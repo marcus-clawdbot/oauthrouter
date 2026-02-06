@@ -68,6 +68,7 @@ Want a specific model? `openclaw config set model openai/gpt-4o` — still get x
 </div>
 
 **The flow:**
+
 1. **Wallet auto-generated** on Base (L2) — saved securely at `~/.openclaw/blockrun/wallet.key`
 2. **Fund with $1 USDC** — enough for hundreds of requests
 3. **Request any model** — "help me call Grok to check @hosseeb's opinion on AI agents"
