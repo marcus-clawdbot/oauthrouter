@@ -11,10 +11,10 @@
  *   # Fund your wallet with USDC on Base (address printed on install)
  *
  *   # Use smart routing (auto-picks cheapest model)
- *   openclaw config set model blockrun/auto
+ *   openclaw models set blockrun/auto
  *
  *   # Or use any specific BlockRun model
- *   openclaw config set model openai/gpt-5.2
+ *   openclaw models set openai/gpt-5.2
  */
 
 import type { OpenClawPluginDefinition, OpenClawPluginApi } from "./types.js";

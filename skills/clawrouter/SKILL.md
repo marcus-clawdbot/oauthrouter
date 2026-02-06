@@ -19,10 +19,10 @@ openclaw plugin install @blockrun/clawrouter
 
 ```bash
 # Enable smart routing (auto-picks cheapest model per request)
-openclaw config set model blockrun/auto
+openclaw models set blockrun/auto
 
 # Or pin a specific model
-openclaw config set model openai/gpt-4o
+openclaw models set openai/gpt-4o
 ```
 
 ## How Routing Works

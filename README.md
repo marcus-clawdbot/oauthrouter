@@ -50,14 +50,14 @@ openclaw plugins install @blockrun/clawrouter
 $5 is enough for thousands of requests
 
 # 3. Enable smart routing
-openclaw config set model blockrun/auto
+openclaw models set blockrun/auto
 ```
 
 Every request now routes to the cheapest capable model.
 
 Already have a funded wallet? `export BLOCKRUN_WALLET_KEY=0x...`
 
-Want a specific model? `openclaw config set model openai/gpt-4o` — still get x402 payments and usage logging.
+Want a specific model? `openclaw models set openai/gpt-4o` — still get x402 payments and usage logging.
 
 ---
 
