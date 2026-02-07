@@ -25,7 +25,8 @@ export const walletKeyAuth: ProviderAuthMethod = {
   label: "Wallet Private Key (disabled)",
   hint: "Disabled: oauthrouter removed the legacy wallet/x402 flow",
   kind: "custom",
-  run: async (_ctx: ProviderAuthContext): Promise<ProviderAuthResult> => {
+  run: async (ctx: ProviderAuthContext): Promise<ProviderAuthResult> => {
+    void ctx;
     throw new Error(
       "oauthrouter: wallet-key auth is disabled (legacy ClawRouter x402 flow removed)",
     );
@@ -38,7 +39,8 @@ export const envKeyAuth: ProviderAuthMethod = {
   label: "Environment Variable (disabled)",
   hint: "Disabled: oauthrouter removed the legacy wallet/x402 flow",
   kind: "custom",
-  run: async (_ctx: ProviderAuthContext): Promise<ProviderAuthResult> => {
+  run: async (ctx: ProviderAuthContext): Promise<ProviderAuthResult> => {
+    void ctx;
     throw new Error(
       "oauthrouter: env-key auth is disabled (legacy ClawRouter x402 flow removed)",
     );

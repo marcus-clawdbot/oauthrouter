@@ -41,7 +41,8 @@ export class BalanceMonitor {
     );
   }
 
-  async checkSufficient(_estimatedCostMicros: bigint): Promise<SufficiencyResult> {
+  async checkSufficient(estimatedCostMicros: bigint): Promise<SufficiencyResult> {
+    void estimatedCostMicros;
     throw new Error(
       "oauthrouter: BalanceMonitor is disabled (legacy ClawRouter wallet/x402 flow removed)",
     );
@@ -54,7 +55,8 @@ export class BalanceMonitor {
   /**
    * Legacy no-op retained for compatibility with code that did optimistic deduction.
    */
-  deductFromCache(_amountMicros: bigint): void {
+  deductFromCache(amountMicros: bigint): void {
+    void amountMicros;
     // no-op
   }
 

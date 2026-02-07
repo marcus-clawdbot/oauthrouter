@@ -1,50 +1,22 @@
 /**
- * Local proxy server (DISABLED)
+ * OAuthRouter proxy (scaffold)
  *
- * This repository was cloned from ClawRouter, which provided a local HTTP proxy
- * that handled BlockRun's x402 micropayments.
+ * ROUTER-001/002 intentionally disabled the legacy BlockRun/x402 proxy.
  *
- * For oauthrouter, that payment/wallet flow is intentionally disabled.
- * This file keeps a minimal stub API so downstream imports/types can compile
- * while new OAuth-based routing/provider work is implemented.
+ * A real OAuth-backed local proxy will be introduced in ROUTER-003+.
  */
 
-export type LowBalanceInfo = {
-  walletAddress: string;
-  balanceUSD: string;
-};
-
-export type InsufficientFundsInfo = {
-  walletAddress: string;
-  balanceUSD: string;
-  requiredUSD: string;
-};
-
 export type ProxyOptions = {
-  /** Legacy option (ClawRouter): wallet private key for x402 signing. */
-  walletKey?: string;
-  /** Optional routing overrides (kept for future use). */
-  routingConfig?: unknown;
-  onReady?: (port: number) => void;
-  onError?: (error: Error) => void;
-  onRouted?: (decision: unknown) => void;
-  onLowBalance?: (info: LowBalanceInfo) => void;
-  onInsufficientFunds?: (info: InsufficientFundsInfo) => void;
+  port?: number;
 };
 
 export type ProxyHandle = {
+  port: number;
   baseUrl: string;
   close: () => Promise<void>;
 };
 
-/**
- * Start the legacy x402 proxy.
- *
- * Disabled in oauthrouter. This will throw until the new proxy/provider design
- * is implemented.
- */
-export async function startProxy(_options: ProxyOptions): Promise<ProxyHandle> {
-  throw new Error(
-    "oauthrouter: startProxy() is disabled (legacy x402/wallet proxy removed during re-scaffold)",
-  );
+export async function startProxy(options: ProxyOptions): Promise<ProxyHandle> {
+  void options;
+  throw new Error("OAuthRouter proxy not implemented yet (scaffold)");
 }

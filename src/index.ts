@@ -1,43 +1,31 @@
 /**
- * @marcus-clawdbot/oauthrouter
+ * OAuthRouter (scaffold)
  *
- * OAuthRouter for OpenClaw.
- *
- * NOTE: This repository was cloned from ClawRouter and is being re-scaffolded.
- * The original x402 / wallet-payment proxy and BlockRun provider wiring are
- * intentionally disabled here (stubs remain in src/ for now).
+ * Forked from BlockRunAI/ClawRouter.
+ * ROUTER-001/002: rebrand + disable all BlockRun/x402 behavior.
  */
 
 import type { OpenClawPluginDefinition, OpenClawPluginApi } from "./types.js";
 import { VERSION } from "./version.js";
 
-/**
- * Detect if we're running in shell completion mode.
- * When `openclaw completion --shell zsh` runs, it loads plugins but only needs
- * the completion script output - any stdout logging pollutes the script.
- */
-function isCompletionMode(): boolean {
-  const args = process.argv;
-  return args.some((arg, i) => arg === "completion" && i >= 1 && i <= 3);
-}
-
 const plugin: OpenClawPluginDefinition = {
   id: "oauthrouter",
   name: "OAuthRouter",
-  description: "OAuth-based routing scaffold for OpenClaw (payments/provider wiring disabled)",
+  description: "Local LLM router scaffold (OAuth-based proxy TBD)",
   version: VERSION,
 
   register(api: OpenClawPluginApi) {
-    // Avoid side effects/logging during shell completion.
-    if (isCompletionMode()) return;
-
-    // Scaffold only: no provider registration, no proxy startup.
-    api.logger.info("OAuthRouter loaded (scaffold). No providers registered yet.");
+    void api;
+    // Intentionally no provider registration yet.
   },
 };
 
 export default plugin;
 
-// Keep the local routing engine available for programmatic use.
-export { route, DEFAULT_ROUTING_CONFIG } from "./router/index.js";
+// Routing engine exports
+export { route, DEFAULT_ROUTING_CONFIG, getFallbackChain } from "./router/index.js";
 export type { RoutingDecision, RoutingConfig, Tier } from "./router/index.js";
+
+// Proxy export remains for API compatibility, but is a stub in scaffold.
+export { startProxy } from "./proxy.js";
+export type { ProxyOptions, ProxyHandle } from "./proxy.js";
