@@ -1,25 +1,71 @@
 {
-  "id": "clawrouter",
-  "name": "ClawRouter",
-  "description": "Smart LLM router — 30+ models, x402 micropayments, 78% cost savings",
+  "id": "oauthrouter",
+  "name": "OAuthRouter",
+  "description": "OAuth-based routing scaffold for OpenClaw",
   "configSchema": {
     "type": "object",
     "properties": {
-      "walletKey": {
-        "type": "string",
-        "description": "EVM wallet private key (0x...). Optional — auto-generated if not set."
-      },
       "routing": {
         "type": "object",
-        "description": "Override default routing configuration"
+        "description": "Override default routing configuration (optional)"
+      },
+      "oauth": {
+        "type": "object",
+        "description": "OAuth configuration (scaffold; provider wiring not implemented yet)"
+      },
+      "proxy": {
+        "type": "object",
+        "description": "Local proxy configuration (scaffold; used by startProxy() programmatic API)",
+        "properties": {
+          "apiBase": {
+            "type": "string",
+            "description": "Upstream base URL to proxy to (e.g. https://example.com/api)."
+          },
+          "port": {
+            "type": "number",
+            "description": "Local listen port (default 8402)."
+          },
+          "requestTimeoutMs": {
+            "type": "number",
+            "description": "Upstream request timeout (ms)."
+          }
+        },
+        "additionalProperties": false
+      },
+      "proxyAuthToken": {
+        "type": "string",
+        "description": "Auth token required on ALL local proxy requests. If unset, the programmatic startProxy() API generates an ephemeral token."
+      },
+      "spendControls": {
+        "type": "object",
+        "description": "Optional spend guardrails (estimated).",
+        "properties": {
+          "maxRequestUsd": {
+            "type": "number",
+            "description": "Reject requests whose estimated cost exceeds this USD value."
+          },
+          "dailyBudgetUsd": {
+            "type": "number",
+            "description": "Reject requests once total estimated spend for the current UTC day exceeds this USD value."
+          },
+          "allowlistModels": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "If set, only these model IDs are allowed (e.g. 'openai/gpt-4o-mini')."
+          },
+          "denylistModels": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "If set, these model IDs are blocked (e.g. 'anthropic/claude-opus-4')."
+          },
+          "allowUnknownCost": {
+            "type": "boolean",
+            "description": "Allow requests when cost cannot be estimated (unknown model)."
+          }
+        },
+        "additionalProperties": false
       }
-    }
-  },
-  "uiHints": {
-    "walletKey": {
-      "label": "Wallet Private Key",
-      "sensitive": true,
-      "placeholder": "0x... (optional — auto-generated)"
-    }
+    },
+    "additionalProperties": true
   }
 }

@@ -1,23 +1,16 @@
 /**
- * BlockRun ProviderPlugin for OpenClaw
+ * Provider wiring (STUB)
  *
- * Registers BlockRun as an LLM provider in OpenClaw.
- * Uses a local x402 proxy to handle micropayments transparently —
- * pi-ai sees a standard OpenAI-compatible API at localhost.
+ * ClawRouter registered a "blockrun" provider backed by a local x402 proxy.
+ * oauthrouter intentionally disables that provider/payment wiring during re-scaffold.
  */
 
 import type { ProviderPlugin } from "./types.js";
-import { buildProviderModels } from "./models.js";
 import type { ProxyHandle } from "./proxy.js";
 
-/**
- * State for the running proxy (set when the plugin activates).
- */
 let activeProxy: ProxyHandle | null = null;
 
-/**
- * Update the proxy handle (called from index.ts when the proxy starts).
- */
+/** Legacy helper retained for compatibility with older code paths. */
 export function setActiveProxy(proxy: ProxyHandle): void {
   activeProxy = proxy;
 }
@@ -27,27 +20,20 @@ export function getActiveProxy(): ProxyHandle | null {
 }
 
 /**
- * BlockRun provider plugin definition.
+ * oauthrouter provider stub.
+ *
+ * This is not currently registered by the plugin entrypoint.
  */
-export const blockrunProvider: ProviderPlugin = {
-  id: "blockrun",
-  label: "BlockRun",
-  docsPath: "https://blockrun.ai/docs",
-  aliases: ["br"],
-  envVars: ["BLOCKRUN_WALLET_KEY"],
-
-  // Model definitions — dynamically set to proxy URL
-  get models() {
-    if (!activeProxy) {
-      // Fallback: point to BlockRun API directly (won't handle x402, but
-      // allows config loading before proxy starts)
-      return buildProviderModels("https://blockrun.ai/api");
-    }
-    return buildProviderModels(activeProxy.baseUrl);
-  },
-
-  // No auth required — the x402 proxy handles wallet-based payments internally.
-  // The proxy auto-generates a wallet on first run and stores it at
-  // ~/.openclaw/blockrun/wallet.key. Users just fund that wallet with USDC.
+export const oauthrouterProvider: ProviderPlugin = {
+  id: "oauthrouter",
+  label: "OAuthRouter",
+  docsPath: "https://github.com/marcus-clawdbot/oauthrouter",
+  aliases: ["or"],
   auth: [],
 };
+
+/**
+ * Legacy export name retained temporarily to reduce churn during re-scaffold.
+ * Do not register this provider in oauthrouter.
+ */
+export const blockrunProvider = oauthrouterProvider;

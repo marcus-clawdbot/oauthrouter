@@ -15,4 +15,4 @@ const require = createRequire(import.meta.url);
 const pkg = require(join(__dirname, "..", "package.json")) as { version: string };
 
 export const VERSION = pkg.version;
-export const USER_AGENT = `clawrouter/${VERSION}`;
+export const USER_AGENT = `oauthrouter/${VERSION}`;
