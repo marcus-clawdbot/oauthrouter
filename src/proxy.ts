@@ -97,7 +97,9 @@ function sendJson(res: ServerResponse, status: number, payload: unknown): void {
 function isAnthropicApiBase(apiBase: string): boolean {
   try {
     const host = new URL(apiBase).hostname.toLowerCase();
-    return host === "api.anthropic.com" || host.endsWith(".anthropic.com") || host.includes("anthropic");
+    return (
+      host === "api.anthropic.com" || host.endsWith(".anthropic.com") || host.includes("anthropic")
+    );
   } catch {
     return apiBase.toLowerCase().includes("anthropic");
   }
@@ -119,7 +121,10 @@ function applyUpstreamAuthHeader(
   headers[name.toLowerCase()] = auth.value;
 }
 
-function applyUpstreamHeaderOverrides(headers: Record<string, string>, options: ProxyOptions): void {
+function applyUpstreamHeaderOverrides(
+  headers: Record<string, string>,
+  options: ProxyOptions,
+): void {
   if (options.upstreamHeaders) {
     for (const [k, v] of Object.entries(options.upstreamHeaders)) {
       if (typeof v === "string") headers[k.toLowerCase()] = v;
@@ -235,7 +240,9 @@ async function proxyRequest(
   let upstreamPath = originalPath;
   let upstreamBody = body;
   let responseMapper:
-    | ((upstream: Response) => Promise<{ status: number; headers: Record<string, string>; body: Buffer }>)
+    | ((
+        upstream: Response,
+      ) => Promise<{ status: number; headers: Record<string, string>; body: Buffer }>)
     | undefined;
 
   // Adapter: OpenAI chat.completions -> Anthropic messages
@@ -257,7 +264,11 @@ async function proxyRequest(
       const upstreamCt = upstream.headers.get("content-type") ?? "application/json";
 
       if (!upstream.ok) {
-        return { status: upstream.status, headers: { "content-type": upstreamCt }, body: Buffer.from(raw) };
+        return {
+          status: upstream.status,
+          headers: { "content-type": upstreamCt },
+          body: Buffer.from(raw),
+        };
       }
 
       let parsedRsp: AnthropicMessagesResponse;
