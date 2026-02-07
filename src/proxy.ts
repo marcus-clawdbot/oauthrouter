@@ -87,9 +87,7 @@ function estimateInputTokensFromBody(body: Buffer, parsed?: ParsedBody): number 
   try {
     const msgs = parsed?.messages;
     if (Array.isArray(msgs) && msgs.length > 0) {
-      const text = msgs
-        .map((m) => (typeof m?.content === "string" ? m.content : ""))
-        .join(" ");
+      const text = msgs.map((m) => (typeof m?.content === "string" ? m.content : "")).join(" ");
       return Math.ceil(text.length / 4);
     }
   } catch {
@@ -204,7 +202,11 @@ async function proxyRequest(
     if (Array.isArray(spend.denylistModels) && spend.denylistModels.length > 0) {
       const deny = new Set(spend.denylistModels.map(normalizeModelId));
       if (deny.has(norm)) {
-        throw new SpendLimitError("MODEL_NOT_ALLOWED", `Model blocked by denylist: ${modelId}`, 403);
+        throw new SpendLimitError(
+          "MODEL_NOT_ALLOWED",
+          `Model blocked by denylist: ${modelId}`,
+          403,
+        );
       }
     }
 
@@ -220,7 +222,10 @@ async function proxyRequest(
   const estimatedInputTokens = estimateInputTokensFromBody(body, parsed);
   const estimatedOutputTokens = maxTokens;
 
-  if (spend?.maxRequestInputTokens !== undefined && estimatedInputTokens > spend.maxRequestInputTokens) {
+  if (
+    spend?.maxRequestInputTokens !== undefined &&
+    estimatedInputTokens > spend.maxRequestInputTokens
+  ) {
     throw new SpendLimitError(
       "REQUEST_TOKENS_TOO_HIGH",
       `Estimated input tokens ${estimatedInputTokens} exceeds max ${spend.maxRequestInputTokens}`,

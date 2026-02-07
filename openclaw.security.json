@@ -8,7 +8,5 @@
     "This package currently ships as a scaffold and does not implement payment signing or wallet key handling.",
     "Provider wiring will be added in future changes; update this file accordingly when introducing OAuth credentials or other sensitive data access."
   ],
-  "references": [
-    "https://github.com/marcus-clawdbot/oauthrouter"
-  ]
+  "references": ["https://github.com/marcus-clawdbot/oauthrouter"]
 }

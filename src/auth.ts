@@ -41,8 +41,6 @@ export const envKeyAuth: ProviderAuthMethod = {
   kind: "custom",
   run: async (ctx: ProviderAuthContext): Promise<ProviderAuthResult> => {
     void ctx;
-    throw new Error(
-      "oauthrouter: env-key auth is disabled (legacy ClawRouter x402 flow removed)",
-    );
+    throw new Error("oauthrouter: env-key auth is disabled (legacy ClawRouter x402 flow removed)");
   },
 };

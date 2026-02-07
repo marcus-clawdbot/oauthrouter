@@ -35,10 +35,7 @@ export type SpendControlsConfig = {
 };
 
 export class SpendLimitError extends Error {
-  readonly code:
-    | "MODEL_NOT_ALLOWED"
-    | "REQUEST_TOKENS_TOO_HIGH"
-    | "DAILY_BUDGET_EXCEEDED";
+  readonly code: "MODEL_NOT_ALLOWED" | "REQUEST_TOKENS_TOO_HIGH" | "DAILY_BUDGET_EXCEEDED";
   readonly status: number;
 
   constructor(code: SpendLimitError["code"], message: string, status = 403) {
@@ -62,7 +59,11 @@ function todayUtc(): string {
 }
 
 export function normalizeModelId(modelId: string): string {
-  return modelId.trim().toLowerCase().replace(/^oauthrouter\//, "").replace(/^blockrun\//, "");
+  return modelId
+    .trim()
+    .toLowerCase()
+    .replace(/^oauthrouter\//, "")
+    .replace(/^blockrun\//, "");
 }
 
 /**
