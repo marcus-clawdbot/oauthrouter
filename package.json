@@ -1,7 +1,7 @@
 {
-  "name": "@blockrun/clawrouter",
-  "version": "0.3.34",
-  "description": "Smart LLM router — save 78% on inference costs. 30+ models, one wallet, x402 micropayments.",
+  "name": "@marcus-clawdbot/oauthrouter",
+  "version": "0.0.1",
+  "description": "OAuthRouter scaffold for OpenClaw (re-scaffolded from ClawRouter; payments/provider wiring disabled).",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -18,7 +18,8 @@
   },
   "files": [
     "dist",
-    "openclaw.plugin.json"
+    "openclaw.plugin.json",
+    "openclaw.security.json"
   ],
   "scripts": {
     "build": "tsup",
@@ -29,28 +30,17 @@
     "format:check": "prettier --check ."
   },
   "keywords": [
-    "llm",
+    "oauth",
     "router",
-    "smart-routing",
-    "ai",
+    "llm",
     "openclaw",
-    "blockrun",
-    "x402",
-    "usdc",
-    "cost-optimization",
-    "openai",
-    "anthropic",
-    "gemini",
-    "deepseek"
+    "smart-routing"
   ],
-  "author": "BlockRun <hello@blockrun.ai>",
+  "author": "marcus-clawdbot",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/BlockRunAI/ClawRouter.git"
-  },
-  "dependencies": {
-    "viem": "^2.39.3"
+    "url": "git+https://github.com/marcus-clawdbot/oauthrouter.git"
   },
   "peerDependencies": {
     "openclaw": ">=2025.1.0"
