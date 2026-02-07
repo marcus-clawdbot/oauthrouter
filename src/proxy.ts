@@ -1,45 +1,35 @@
 /**
- * Local proxy server
- *
- * oauthrouter is being re-scaffolded from ClawRouter. The original x402 / wallet
- * payment flow is disabled, but oauthrouter still needs a secure local proxy
- * surface for future OAuth-based upstream routing.
+ * Local proxy server (OAuthRouter)
  *
  * ROUTER-003:
  *  - Enforce an auth token on ALL local proxy requests
- *  - Add spend controls skeleton (per-request max, daily budget, model allowlists)
+ *  - Add spend controls skeleton (token/quota based)
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { randomBytes } from "node:crypto";
 
-import { BLOCKRUN_MODELS } from "./models.js";
 import { constantTimeTokenEquals } from "./proxy-token.js";
 import {
   DailyBudgetTracker,
   SpendLimitError,
   type SpendControlsConfig,
-  usdToMicros,
   normalizeModelId,
-  microsToUsdString,
 } from "./spend-controls.js";
 
 const DEFAULT_PORT = 8402;
 const DEFAULT_REQUEST_TIMEOUT_MS = 180_000;
 
 export type ProxyOptions = {
-  /** Upstream base URL (e.g. "https://example.com/api"). */
+  /** Upstream base URL (e.g. "https://api.openai.com"). */
   apiBase: string;
   /** Port to listen on (default: 8402). */
   port?: number;
   /** Request timeout (ms). */
   requestTimeoutMs?: number;
 
-  /**
-   * Auth token required on ALL local proxy requests.
-   * If omitted, one is generated for this process.
-   */
+  /** Auth token required on ALL local proxy requests. If omitted, one is generated. */
   authToken?: string;
 
   /** Optional spend controls (guardrails). */
@@ -70,7 +60,7 @@ function extractClientToken(req: IncomingMessage): string | undefined {
     return auth.trim();
   }
 
-  // Common OpenAI-compatible fallbacks
+  // OpenAI-compatible fallbacks
   const xApiKey = getHeaderValue(req.headers["x-api-key"]);
   if (xApiKey) return xApiKey.trim();
 
@@ -89,25 +79,23 @@ function sendJson(res: ServerResponse, status: number, payload: unknown): void {
 type ParsedBody = {
   model?: string;
   max_tokens?: number;
+  messages?: Array<{ role?: string; content?: unknown }>;
 };
 
-function estimateAmountMicros(
-  modelId: string,
-  bodyLength: number,
-  maxTokens: number,
-): bigint | undefined {
-  const model = BLOCKRUN_MODELS.find((m) => m.id === modelId);
-  if (!model) return undefined;
-
-  const estimatedInputTokens = Math.ceil(bodyLength / 4);
-  const estimatedOutputTokens = maxTokens || model.maxOutput || 4096;
-
-  const costUsd =
-    (estimatedInputTokens / 1_000_000) * model.inputPrice +
-    (estimatedOutputTokens / 1_000_000) * model.outputPrice;
-
-  const amountMicros = Math.max(100, Math.ceil(costUsd * 1.2 * 1_000_000));
-  return BigInt(amountMicros);
+function estimateInputTokensFromBody(body: Buffer, parsed?: ParsedBody): number {
+  // Best-effort: concatenate message contents if present; otherwise use raw bytes.
+  try {
+    const msgs = parsed?.messages;
+    if (Array.isArray(msgs) && msgs.length > 0) {
+      const text = msgs
+        .map((m) => (typeof m?.content === "string" ? m.content : ""))
+        .join(" ");
+      return Math.ceil(text.length / 4);
+    }
+  } catch {
+    // ignore
+  }
+  return Math.ceil(body.length / 4);
 }
 
 /**
@@ -115,9 +103,7 @@ function estimateAmountMicros(
  */
 export async function startProxy(options: ProxyOptions): Promise<ProxyHandle> {
   const apiBase = options.apiBase;
-  if (!apiBase) {
-    throw new Error("oauthrouter: startProxy() requires apiBase");
-  }
+  if (!apiBase) throw new Error("oauthrouter: startProxy() requires apiBase");
 
   const authToken = options.authToken ?? randomBytes(32).toString("base64url");
   const budgetTracker = new DailyBudgetTracker();
@@ -196,11 +182,12 @@ async function proxyRequest(
   const body = Buffer.concat(chunks);
 
   // Parse model/max_tokens when possible
+  let parsed: ParsedBody | undefined;
   let modelId: string | undefined;
   let maxTokens = 4096;
   if (body.length > 0) {
     try {
-      const parsed = JSON.parse(body.toString()) as ParsedBody;
+      parsed = JSON.parse(body.toString()) as ParsedBody;
       if (typeof parsed.model === "string") modelId = parsed.model;
       if (typeof parsed.max_tokens === "number") maxTokens = parsed.max_tokens;
     } catch {
@@ -229,48 +216,44 @@ async function proxyRequest(
     }
   }
 
-  // --- Estimate cost (if we have a model) ---
-  let estimatedCostMicros: bigint | undefined;
-  if (modelId) {
-    estimatedCostMicros = estimateAmountMicros(normalizeModelId(modelId), body.length, maxTokens);
+  // --- Token estimates + per-request limits ---
+  const estimatedInputTokens = estimateInputTokensFromBody(body, parsed);
+  const estimatedOutputTokens = maxTokens;
+
+  if (spend?.maxRequestInputTokens !== undefined && estimatedInputTokens > spend.maxRequestInputTokens) {
+    throw new SpendLimitError(
+      "REQUEST_TOKENS_TOO_HIGH",
+      `Estimated input tokens ${estimatedInputTokens} exceeds max ${spend.maxRequestInputTokens}`,
+      403,
+    );
   }
 
-  // --- Per-request cap ---
-  if (spend?.maxRequestUsd !== undefined) {
-    const maxMicros = usdToMicros(spend.maxRequestUsd);
-    if (estimatedCostMicros === undefined) {
-      if (!spend.allowUnknownCost) {
-        throw new SpendLimitError(
-          "COST_ESTIMATE_UNAVAILABLE",
-          "Cost estimate unavailable; set allowUnknownCost=true to override.",
-          403,
-        );
-      }
-    } else if (estimatedCostMicros > maxMicros) {
-      throw new SpendLimitError(
-        "REQUEST_COST_TOO_HIGH",
-        `Estimated request cost $${microsToUsdString(estimatedCostMicros)} exceeds max $${spend.maxRequestUsd.toFixed(6)}`,
-        403,
-      );
-    }
+  if (
+    spend?.maxRequestOutputTokens !== undefined &&
+    estimatedOutputTokens > spend.maxRequestOutputTokens
+  ) {
+    throw new SpendLimitError(
+      "REQUEST_TOKENS_TOO_HIGH",
+      `Requested max_tokens ${estimatedOutputTokens} exceeds max ${spend.maxRequestOutputTokens}`,
+      403,
+    );
   }
 
-  // --- Daily budget (reserve/commit) ---
-  let reservedBudgetMicros: bigint | undefined;
-  if (spend?.dailyBudgetUsd !== undefined) {
-    const limitMicros = usdToMicros(spend.dailyBudgetUsd);
-    if (estimatedCostMicros === undefined) {
-      if (!spend.allowUnknownCost) {
-        throw new SpendLimitError(
-          "COST_ESTIMATE_UNAVAILABLE",
-          "Cost estimate unavailable; set allowUnknownCost=true to override.",
-          403,
-        );
-      }
-    } else {
-      await budgetTracker.reserve(estimatedCostMicros, limitMicros);
-      reservedBudgetMicros = estimatedCostMicros;
-    }
+  // --- Daily budgets (reserve/commit) ---
+  let reserved = false;
+  if (
+    spend?.dailyInputTokenBudget !== undefined ||
+    spend?.dailyOutputTokenBudget !== undefined ||
+    spend?.dailyRequestBudget !== undefined
+  ) {
+    await budgetTracker.reserve({
+      inputTokens: estimatedInputTokens,
+      outputTokens: estimatedOutputTokens,
+      inputLimit: spend.dailyInputTokenBudget,
+      outputLimit: spend.dailyOutputTokenBudget,
+      requestLimit: spend.dailyRequestBudget,
+    });
+    reserved = true;
   }
 
   // Forward headers, stripping hop-by-hop + local auth
@@ -328,14 +311,14 @@ async function proxyRequest(
 
     res.end();
 
-    if (reservedBudgetMicros !== undefined) {
-      await budgetTracker.commit(reservedBudgetMicros);
+    if (reserved) {
+      await budgetTracker.commit(estimatedInputTokens, estimatedOutputTokens);
     }
   } catch (err) {
     clearTimeout(timeoutId);
 
-    if (reservedBudgetMicros !== undefined) {
-      await budgetTracker.rollback(reservedBudgetMicros);
+    if (reserved) {
+      await budgetTracker.rollback(estimatedInputTokens, estimatedOutputTokens);
     }
 
     if (err instanceof Error && err.name === "AbortError") {

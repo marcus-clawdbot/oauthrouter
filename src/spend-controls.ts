@@ -1,12 +1,14 @@
 /**
- * Spend Controls (Budgets / Allowlists)
+ * Spend Controls (OAuthRouter)
  *
- * Skeleton implementation:
- * - Per-request max cost (estimated)
- * - Daily budget cap (estimated)
+ * For OAuth-backed providers (Claude Max / GPT Pro style), we can't reliably
+ * map to real $ cost. So v0 controls are token/quota based:
+ * - Per-request input/output token caps (estimated)
+ * - Daily UTC budgets for input/output tokens (estimated)
+ * - Daily request cap
  * - Model allow/deny lists
  *
- * NOTE: Final upstream settlement may differ from the estimate.
+ * Estimation note: input tokens are approximated as ~4 chars/token.
  */
 
 import { readFile, writeFile, mkdir } from "node:fs/promises";
@@ -14,31 +16,32 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 
 export type SpendControlsConfig = {
-  /** Reject requests whose estimated cost exceeds this value (USD). */
-  maxRequestUsd?: number;
-  /** Reject requests once total estimated spend for the current UTC day exceeds this value (USD). */
-  dailyBudgetUsd?: number;
+  /** Reject if estimated input tokens exceed this number. */
+  maxRequestInputTokens?: number;
+  /** Reject if estimated output tokens (max_tokens) exceed this number. */
+  maxRequestOutputTokens?: number;
+
+  /** Reject once total estimated input tokens for the current UTC day exceeds this number. */
+  dailyInputTokenBudget?: number;
+  /** Reject once total estimated output tokens for the current UTC day exceeds this number. */
+  dailyOutputTokenBudget?: number;
+  /** Reject once total requests for the current UTC day exceeds this number. */
+  dailyRequestBudget?: number;
+
   /** If set, only these models are allowed. */
   allowlistModels?: string[];
   /** If set, these models are blocked. */
   denylistModels?: string[];
-  /** If true, allow requests when cost cannot be estimated (unknown model). */
-  allowUnknownCost?: boolean;
 };
 
 export class SpendLimitError extends Error {
   readonly code:
     | "MODEL_NOT_ALLOWED"
-    | "REQUEST_COST_TOO_HIGH"
-    | "DAILY_BUDGET_EXCEEDED"
-    | "COST_ESTIMATE_UNAVAILABLE";
+    | "REQUEST_TOKENS_TOO_HIGH"
+    | "DAILY_BUDGET_EXCEEDED";
   readonly status: number;
 
-  constructor(
-    code: SpendLimitError["code"],
-    message: string,
-    status = 403,
-  ) {
+  constructor(code: SpendLimitError["code"], message: string, status = 403) {
     super(message);
     this.name = "SpendLimitError";
     this.code = code;
@@ -49,24 +52,13 @@ export class SpendLimitError extends Error {
 type BudgetFile = {
   version: 1;
   dateUtc: string;
-  spentMicros: string;
+  inputTokens: number;
+  outputTokens: number;
+  requests: number;
 };
 
 function todayUtc(): string {
   return new Date().toISOString().slice(0, 10);
-}
-
-export function usdToMicros(usd: number): bigint {
-  if (!Number.isFinite(usd) || usd < 0) throw new Error(`Invalid USD amount: ${usd}`);
-  return BigInt(Math.round(usd * 1_000_000));
-}
-
-export function microsToUsdString(micros: bigint): string {
-  const sign = micros < 0n ? "-" : "";
-  const abs = micros < 0n ? -micros : micros;
-  const whole = abs / 1_000_000n;
-  const frac = abs % 1_000_000n;
-  return `${sign}${whole.toString()}.${frac.toString().padStart(6, "0")}`;
 }
 
 export function normalizeModelId(modelId: string): string {
@@ -75,17 +67,20 @@ export function normalizeModelId(modelId: string): string {
 
 /**
  * Daily budget tracker with simple file-backed persistence.
- *
- * - Date boundary: UTC
- * - File: ~/.openclaw/oauthrouter/budget.json
+ * File: ~/.openclaw/oauthrouter/budget.json
  */
 export class DailyBudgetTracker {
   private readonly filePath: string;
   private loaded = false;
 
   private dateUtc: string = todayUtc();
-  private spentMicros: bigint = 0n;
-  private reservedMicros: bigint = 0n;
+  private inputTokens = 0;
+  private outputTokens = 0;
+  private requests = 0;
+
+  private reservedInputTokens = 0;
+  private reservedOutputTokens = 0;
+  private reservedRequests = 0;
 
   private queue: Promise<void> = Promise.resolve();
 
@@ -108,6 +103,19 @@ export class DailyBudgetTracker {
     }
   }
 
+  private async save(): Promise<void> {
+    const dir = join(homedir(), ".openclaw", "oauthrouter");
+    await mkdir(dir, { recursive: true });
+    const data: BudgetFile = {
+      version: 1,
+      dateUtc: this.dateUtc,
+      inputTokens: this.inputTokens,
+      outputTokens: this.outputTokens,
+      requests: this.requests,
+    };
+    await writeFile(this.filePath, JSON.stringify(data, null, 2) + "\n", { mode: 0o600 });
+  }
+
   private async ensureLoaded(): Promise<void> {
     if (this.loaded) return;
 
@@ -121,18 +129,29 @@ export class DailyBudgetTracker {
         if (parsed.version === 1 && typeof parsed.dateUtc === "string") {
           if (parsed.dateUtc === current) {
             this.dateUtc = parsed.dateUtc;
-            if (typeof parsed.spentMicros === "string") this.spentMicros = BigInt(parsed.spentMicros);
+            this.inputTokens = Number(parsed.inputTokens ?? 0);
+            this.outputTokens = Number(parsed.outputTokens ?? 0);
+            this.requests = Number(parsed.requests ?? 0);
           } else {
+            // new UTC day
             this.dateUtc = current;
-            this.spentMicros = 0n;
-            this.reservedMicros = 0n;
+            this.inputTokens = 0;
+            this.outputTokens = 0;
+            this.requests = 0;
+            this.reservedInputTokens = 0;
+            this.reservedOutputTokens = 0;
+            this.reservedRequests = 0;
             await this.save();
           }
         }
       } catch {
         this.dateUtc = current;
-        this.spentMicros = 0n;
-        this.reservedMicros = 0n;
+        this.inputTokens = 0;
+        this.outputTokens = 0;
+        this.requests = 0;
+        this.reservedInputTokens = 0;
+        this.reservedOutputTokens = 0;
+        this.reservedRequests = 0;
         await this.save();
       }
 
@@ -140,61 +159,85 @@ export class DailyBudgetTracker {
     });
   }
 
-  private async save(): Promise<void> {
-    const dir = join(homedir(), ".openclaw", "oauthrouter");
-    await mkdir(dir, { recursive: true });
-    const data: BudgetFile = {
-      version: 1,
-      dateUtc: this.dateUtc,
-      spentMicros: this.spentMicros.toString(),
-    };
-    await writeFile(this.filePath, JSON.stringify(data, null, 2) + "\n", { mode: 0o600 });
-  }
-
   private async rollDayIfNeeded(): Promise<void> {
     const current = todayUtc();
     if (current === this.dateUtc) return;
     this.dateUtc = current;
-    this.spentMicros = 0n;
-    this.reservedMicros = 0n;
+    this.inputTokens = 0;
+    this.outputTokens = 0;
+    this.requests = 0;
+    this.reservedInputTokens = 0;
+    this.reservedOutputTokens = 0;
+    this.reservedRequests = 0;
     await this.save();
   }
 
-  async reserve(costMicros: bigint, dailyLimitMicros: bigint): Promise<void> {
+  async reserve(opts: {
+    inputTokens: number;
+    outputTokens: number;
+    inputLimit?: number;
+    outputLimit?: number;
+    requestLimit?: number;
+  }): Promise<void> {
     await this.ensureLoaded();
 
     return this.withLock(async () => {
       await this.rollDayIfNeeded();
-      const projected = this.spentMicros + this.reservedMicros + costMicros;
-      if (projected > dailyLimitMicros) {
+
+      const projectedInput = this.inputTokens + this.reservedInputTokens + opts.inputTokens;
+      const projectedOutput = this.outputTokens + this.reservedOutputTokens + opts.outputTokens;
+      const projectedReq = this.requests + this.reservedRequests + 1;
+
+      if (opts.inputLimit !== undefined && projectedInput > opts.inputLimit) {
         throw new SpendLimitError(
           "DAILY_BUDGET_EXCEEDED",
-          `Daily budget exceeded. Spent: $${microsToUsdString(this.spentMicros)}, ` +
-            `Requested: $${microsToUsdString(costMicros)}, ` +
-            `Limit: $${microsToUsdString(dailyLimitMicros)} (UTC day)`,
-          403,
+          `Daily input token budget exceeded. Used=${this.inputTokens}, requested=${opts.inputTokens}, limit=${opts.inputLimit} (UTC day)`,
         );
       }
-      this.reservedMicros += costMicros;
+      if (opts.outputLimit !== undefined && projectedOutput > opts.outputLimit) {
+        throw new SpendLimitError(
+          "DAILY_BUDGET_EXCEEDED",
+          `Daily output token budget exceeded. Used=${this.outputTokens}, requested=${opts.outputTokens}, limit=${opts.outputLimit} (UTC day)`,
+        );
+      }
+      if (opts.requestLimit !== undefined && projectedReq > opts.requestLimit) {
+        throw new SpendLimitError(
+          "DAILY_BUDGET_EXCEEDED",
+          `Daily request budget exceeded. Used=${this.requests}, limit=${opts.requestLimit} (UTC day)`,
+        );
+      }
+
+      this.reservedInputTokens += opts.inputTokens;
+      this.reservedOutputTokens += opts.outputTokens;
+      this.reservedRequests += 1;
     });
   }
 
-  async commit(costMicros: bigint): Promise<void> {
+  async commit(inputTokens: number, outputTokens: number): Promise<void> {
     await this.ensureLoaded();
 
     return this.withLock(async () => {
       await this.rollDayIfNeeded();
-      this.reservedMicros = this.reservedMicros >= costMicros ? this.reservedMicros - costMicros : 0n;
-      this.spentMicros += costMicros;
+
+      this.reservedInputTokens = Math.max(0, this.reservedInputTokens - inputTokens);
+      this.reservedOutputTokens = Math.max(0, this.reservedOutputTokens - outputTokens);
+      this.reservedRequests = Math.max(0, this.reservedRequests - 1);
+
+      this.inputTokens += inputTokens;
+      this.outputTokens += outputTokens;
+      this.requests += 1;
+
       await this.save();
     });
   }
 
-  async rollback(costMicros: bigint): Promise<void> {
+  async rollback(inputTokens: number, outputTokens: number): Promise<void> {
     await this.ensureLoaded();
 
     return this.withLock(async () => {
-      this.reservedMicros = this.reservedMicros >= costMicros ? this.reservedMicros - costMicros : 0n;
+      this.reservedInputTokens = Math.max(0, this.reservedInputTokens - inputTokens);
+      this.reservedOutputTokens = Math.max(0, this.reservedOutputTokens - outputTokens);
+      this.reservedRequests = Math.max(0, this.reservedRequests - 1);
     });
   }
 }
