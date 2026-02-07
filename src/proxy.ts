@@ -38,11 +38,11 @@ import { logUsage, type UsageEntry } from "./logger.js";
 import { RequestDeduplicator } from "./dedup.js";
 import { BalanceMonitor } from "./balance.js";
 import { InsufficientFundsError, EmptyWalletError } from "./errors.js";
+import { USER_AGENT } from "./version.js";
 
 const BLOCKRUN_API = "https://blockrun.ai/api";
 const AUTO_MODEL = "blockrun/auto";
 const AUTO_MODEL_SHORT = "auto"; // OpenClaw strips provider prefix
-const USER_AGENT = "clawrouter/0.3.19";
 const HEARTBEAT_INTERVAL_MS = 2_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 180_000; // 3 minutes (allows for on-chain tx + LLM response)
 const DEFAULT_PORT = 8402;

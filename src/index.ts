@@ -27,6 +27,7 @@ import { OPENCLAW_MODELS } from "./models.js";
 import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { VERSION } from "./version.js";
 
 /**
  * Detect if we're running in shell completion mode.
@@ -238,7 +239,7 @@ const plugin: OpenClawPluginDefinition = {
   id: "clawrouter",
   name: "ClawRouter",
   description: "Smart LLM router — 30+ models, x402 micropayments, 78% cost savings",
-  version: "0.3.19",
+  version: VERSION,
 
   register(api: OpenClawPluginApi) {
     // Skip heavy initialization in completion mode — only completion script is needed
