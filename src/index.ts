@@ -38,5 +38,11 @@ export {
   parseOpenClawAuthProfileStoreJson,
   resolveBestProfileIdForProvider,
   resolveBearerTokenForProvider,
+  getValidOpenAICodexAccessToken,
 } from "./openclaw-auth-profiles.js";
-export type { OpenClawAuthProfileStore, OpenClawAuthProfileCredential } from "./openclaw-auth-profiles.js";
+export type {
+  OpenClawAuthProfileStore,
+  OpenClawAuthProfileCredential,
+  OpenAICodexOAuthProfile,
+  OpenAICodexAccessTokenInfo,
+} from "./openclaw-auth-profiles.js";
