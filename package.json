@@ -6,9 +6,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "openclaw": {
-    "extensions": [
-      "./dist/index.js"
-    ]
+    "extensions": ["./dist/index.js"]
   },
   "exports": {
     ".": {
@@ -16,11 +14,7 @@
       "types": "./dist/index.d.ts"
     }
   },
-  "files": [
-    "dist",
-    "openclaw.plugin.json",
-    "openclaw.security.json"
-  ],
+  "files": ["dist", "openclaw.plugin.json", "openclaw.security.json"],
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
@@ -28,15 +22,10 @@
     "lint": "eslint src/",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "test": "npm run build --silent && node --test test/*.test.mjs",
     "prepare": "husky"
   },
-  "keywords": [
-    "oauth",
-    "router",
-    "llm",
-    "openclaw",
-    "smart-routing"
-  ],
+  "keywords": ["oauth", "router", "llm", "openclaw", "smart-routing"],
   "author": "marcus-clawdbot",
   "license": "MIT",
   "repository": {
@@ -51,8 +40,12 @@
       "optional": true
     }
   },
+  "dependencies": {
+    "proper-lockfile": "^4.1.2"
+  },
   "devDependencies": {
     "@eslint/js": "^9.39.2",
+    "@types/proper-lockfile": "^4.1.4",
     "eslint": "^9.39.2",
     "husky": "^9.1.7",
     "openclaw": "latest",
