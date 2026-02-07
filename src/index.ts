@@ -26,6 +26,7 @@ export default plugin;
 export { route, DEFAULT_ROUTING_CONFIG, getFallbackChain } from "./router/index.js";
 export type { RoutingDecision, RoutingConfig, Tier } from "./router/index.js";
 
-// Proxy export remains for API compatibility, but is a stub in scaffold.
+// Proxy export is available for programmatic use (plugin wiring TBD).
 export { startProxy } from "./proxy.js";
 export type { ProxyOptions, ProxyHandle } from "./proxy.js";
+export type { SpendControlsConfig } from "./spend-controls.js";
