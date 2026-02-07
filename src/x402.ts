@@ -33,7 +33,8 @@ export type PaymentFetchResult = {
  * In ClawRouter, this created a fetch() wrapper that handled x402 payment.
  * In oauthrouter, payment signing is disabled; the wrapper just calls fetch().
  */
-export function createPaymentFetch(_privateKey: `0x${string}`): PaymentFetchResult {
+export function createPaymentFetch(privateKey: `0x${string}`): PaymentFetchResult {
+  void privateKey;
   const cache = new PaymentCache();
 
   return {

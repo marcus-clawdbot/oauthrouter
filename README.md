@@ -10,7 +10,7 @@ This repository was cloned from **ClawRouter** and is being re-scaffolded:
 
 ## Status
 
-This is an *initial scaffold*.
+This is an _initial scaffold_.
 
 - The plugin loads, but **does not register any providers** yet.
 - The legacy proxy/payment APIs exist only as disabled stubs to keep the codebase compiling while OAuth-based wiring is implemented.
