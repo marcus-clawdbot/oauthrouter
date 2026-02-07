@@ -17,6 +17,12 @@ import {
   type SpendControlsConfig,
   normalizeModelId,
 } from "./spend-controls.js";
+import {
+  buildAnthropicMessagesRequestFromOpenAI,
+  anthropicMessagesResponseToOpenAIChatCompletion,
+  type OpenAIChatCompletionsRequest,
+  type AnthropicMessagesResponse,
+} from "./adapters/anthropic.js";
 
 const DEFAULT_PORT = 8402;
 const DEFAULT_REQUEST_TIMEOUT_MS = 180_000;
@@ -34,6 +40,18 @@ export type ProxyOptions = {
 
   /** Optional spend controls (guardrails). */
   spendControls?: SpendControlsConfig;
+
+  /** Optional static headers added to upstream requests. */
+  upstreamHeaders?: Record<string, string>;
+
+  /**
+   * Upstream auth header to apply when forwarding requests.
+   *
+   * ROUTER-004 is expected to provide this.
+   * - If a string: treated as an Authorization header value.
+   * - If an object: sets headers[name] = value.
+   */
+  upstreamAuthHeader?: { name: string; value: string } | string;
 
   onReady?: (port: number) => void;
   onError?: (error: Error) => void;
@@ -74,6 +92,40 @@ function sendJson(res: ServerResponse, status: number, payload: unknown): void {
   if (res.headersSent) return;
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(payload));
+}
+
+function isAnthropicApiBase(apiBase: string): boolean {
+  try {
+    const host = new URL(apiBase).hostname.toLowerCase();
+    return host === "api.anthropic.com" || host.endsWith(".anthropic.com") || host.includes("anthropic");
+  } catch {
+    return apiBase.toLowerCase().includes("anthropic");
+  }
+}
+
+function applyUpstreamAuthHeader(
+  headers: Record<string, string>,
+  auth: ProxyOptions["upstreamAuthHeader"],
+): void {
+  if (!auth) return;
+
+  if (typeof auth === "string") {
+    headers["authorization"] = auth;
+    return;
+  }
+
+  const name = auth.name?.trim();
+  if (!name) return;
+  headers[name.toLowerCase()] = auth.value;
+}
+
+function applyUpstreamHeaderOverrides(headers: Record<string, string>, options: ProxyOptions): void {
+  if (options.upstreamHeaders) {
+    for (const [k, v] of Object.entries(options.upstreamHeaders)) {
+      if (typeof v === "string") headers[k.toLowerCase()] = v;
+    }
+  }
+  applyUpstreamAuthHeader(headers, options.upstreamAuthHeader);
 }
 
 type ParsedBody = {
@@ -170,7 +222,7 @@ async function proxyRequest(
   options: ProxyOptions,
   budgetTracker: DailyBudgetTracker,
 ): Promise<void> {
-  const upstreamUrl = `${apiBase}${req.url}`;
+  const originalPath = req.url ?? "";
 
   // Collect body
   const chunks: Buffer[] = [];
@@ -178,6 +230,64 @@ async function proxyRequest(
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
   const body = Buffer.concat(chunks);
+
+  // Upstream defaults (passthrough)
+  let upstreamPath = originalPath;
+  let upstreamBody = body;
+  let responseMapper:
+    | ((upstream: Response) => Promise<{ status: number; headers: Record<string, string>; body: Buffer }>)
+    | undefined;
+
+  // Adapter: OpenAI chat.completions -> Anthropic messages
+  const anthropicMode = isAnthropicApiBase(apiBase);
+  const isChatCompletions =
+    originalPath === "/v1/chat/completions" || originalPath.startsWith("/v1/chat/completions?");
+
+  if (anthropicMode && isChatCompletions) {
+    if (body.length === 0) throw new Error("Empty request body");
+
+    const openAiReq = JSON.parse(body.toString()) as OpenAIChatCompletionsRequest;
+    const anthropicReq = buildAnthropicMessagesRequestFromOpenAI(openAiReq);
+
+    upstreamPath = "/v1/messages";
+    upstreamBody = Buffer.from(JSON.stringify(anthropicReq));
+
+    responseMapper = async (upstream) => {
+      const raw = await upstream.text();
+      const upstreamCt = upstream.headers.get("content-type") ?? "application/json";
+
+      if (!upstream.ok) {
+        return { status: upstream.status, headers: { "content-type": upstreamCt }, body: Buffer.from(raw) };
+      }
+
+      let parsedRsp: AnthropicMessagesResponse;
+      try {
+        parsedRsp = JSON.parse(raw) as AnthropicMessagesResponse;
+      } catch {
+        return {
+          status: 502,
+          headers: { "content-type": "application/json" },
+          body: Buffer.from(
+            JSON.stringify({
+              error: { message: "Anthropic upstream returned non-JSON", type: "upstream_error" },
+            }),
+          ),
+        };
+      }
+
+      const mapped = anthropicMessagesResponseToOpenAIChatCompletion(parsedRsp, {
+        requestedModel: typeof openAiReq.model === "string" ? openAiReq.model : undefined,
+      });
+
+      return {
+        status: 200,
+        headers: { "content-type": "application/json" },
+        body: Buffer.from(JSON.stringify(mapped)),
+      };
+    };
+  }
+
+  const upstreamUrl = `${apiBase}${upstreamPath}`;
 
   // Parse model/max_tokens when possible
   let parsed: ParsedBody | undefined;
@@ -264,19 +374,34 @@ async function proxyRequest(
   // Forward headers, stripping hop-by-hop + local auth
   const headers: Record<string, string> = {};
   for (const [key, value] of Object.entries(req.headers)) {
+    const k = key.toLowerCase();
     if (
-      key === "host" ||
-      key === "connection" ||
-      key === "transfer-encoding" ||
-      key === "content-length" ||
-      key === "authorization" ||
-      key === "proxy-authorization" ||
-      key === "x-api-key" ||
-      key === "x-openai-api-key"
+      k === "host" ||
+      k === "connection" ||
+      k === "transfer-encoding" ||
+      k === "content-length" ||
+      k === "authorization" ||
+      k === "proxy-authorization" ||
+      k === "x-api-key" ||
+      k === "x-openai-api-key"
     ) {
       continue;
     }
-    if (typeof value === "string") headers[key] = value;
+    if (typeof value === "string") headers[k] = value;
+  }
+
+  applyUpstreamHeaderOverrides(headers, options);
+
+  if (!headers["content-type"]) headers["content-type"] = "application/json";
+
+  if (anthropicMode && !headers["anthropic-version"]) {
+    headers["anthropic-version"] = "2023-06-01";
+  }
+
+  if (anthropicMode && !headers["x-api-key"]) {
+    throw new Error(
+      "Anthropic adapter requires an x-api-key header (set options.upstreamAuthHeader={name:'x-api-key',value:'...'} or options.upstreamHeaders.x-api-key)",
+    );
   }
 
   const timeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
@@ -287,34 +412,40 @@ async function proxyRequest(
     const upstream = await fetch(upstreamUrl, {
       method: req.method ?? "POST",
       headers,
-      body: body.length > 0 ? body : undefined,
+      body: upstreamBody.length > 0 ? upstreamBody : undefined,
       signal: controller.signal,
     });
 
     clearTimeout(timeoutId);
 
-    const responseHeaders: Record<string, string> = {};
-    upstream.headers.forEach((value, key) => {
-      if (key === "transfer-encoding" || key === "connection") return;
-      responseHeaders[key] = value;
-    });
+    if (responseMapper) {
+      const mapped = await responseMapper(upstream);
+      res.writeHead(mapped.status, mapped.headers);
+      res.end(mapped.body);
+    } else {
+      const responseHeaders: Record<string, string> = {};
+      upstream.headers.forEach((value, key) => {
+        if (key === "transfer-encoding" || key === "connection") return;
+        responseHeaders[key] = value;
+      });
 
-    res.writeHead(upstream.status, responseHeaders);
+      res.writeHead(upstream.status, responseHeaders);
 
-    if (upstream.body) {
-      const reader = upstream.body.getReader();
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          res.write(value);
+      if (upstream.body) {
+        const reader = upstream.body.getReader();
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            res.write(value);
+          }
+        } finally {
+          reader.releaseLock();
         }
-      } finally {
-        reader.releaseLock();
       }
-    }
 
-    res.end();
+      res.end();
+    }
 
     if (reserved) {
       await budgetTracker.commit(estimatedInputTokens, estimatedOutputTokens);
