@@ -22,6 +22,24 @@ type InflightEntry = {
 const DEFAULT_TTL_MS = 30_000; // 30 seconds
 const MAX_BODY_SIZE = 1_048_576; // 1MB
 
+/**
+ * Canonicalize JSON by sorting object keys recursively.
+ * Ensures identical logical content produces identical string regardless of field order.
+ */
+function canonicalize(obj: unknown): unknown {
+  if (obj === null || typeof obj !== "object") {
+    return obj;
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(canonicalize);
+  }
+  const sorted: Record<string, unknown> = {};
+  for (const key of Object.keys(obj).sort()) {
+    sorted[key] = canonicalize((obj as Record<string, unknown>)[key]);
+  }
+  return sorted;
+}
+
 export class RequestDeduplicator {
   private inflight = new Map<string, InflightEntry>();
   private completed = new Map<string, CachedResponse>();
@@ -33,7 +51,16 @@ export class RequestDeduplicator {
 
   /** Hash request body to create a dedup key. */
   static hash(body: Buffer): string {
-    return createHash("sha256").update(body).digest("hex").slice(0, 16);
+    // Canonicalize JSON to ensure consistent hashing regardless of field order
+    let content = body;
+    try {
+      const parsed = JSON.parse(body.toString());
+      const canonical = canonicalize(parsed);
+      content = Buffer.from(JSON.stringify(canonical));
+    } catch {
+      // Not valid JSON, use raw bytes
+    }
+    return createHash("sha256").update(content).digest("hex").slice(0, 16);
   }
 
   /** Check if a response is cached for this key. */
