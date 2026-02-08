@@ -39,4 +39,7 @@ export {
   resolveBestProfileIdForProvider,
   resolveBearerTokenForProvider,
 } from "./openclaw-auth-profiles.js";
-export type { OpenClawAuthProfileStore, OpenClawAuthProfileCredential } from "./openclaw-auth-profiles.js";
+export type {
+  OpenClawAuthProfileStore,
+  OpenClawAuthProfileCredential,
+} from "./openclaw-auth-profiles.js";

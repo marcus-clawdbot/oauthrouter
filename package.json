@@ -6,7 +6,9 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "openclaw": {
-    "extensions": ["./dist/index.js"]
+    "extensions": [
+      "./dist/index.js"
+    ]
   },
   "exports": {
     ".": {
@@ -14,7 +16,11 @@
       "types": "./dist/index.d.ts"
     }
   },
-  "files": ["dist", "openclaw.plugin.json", "openclaw.security.json"],
+  "files": [
+    "dist",
+    "openclaw.plugin.json",
+    "openclaw.security.json"
+  ],
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
@@ -25,7 +31,13 @@
     "test": "npm run build --silent && node --test test/*.test.mjs",
     "prepare": "husky"
   },
-  "keywords": ["oauth", "router", "llm", "openclaw", "smart-routing"],
+  "keywords": [
+    "oauth",
+    "router",
+    "llm",
+    "openclaw",
+    "smart-routing"
+  ],
   "author": "marcus-clawdbot",
   "license": "MIT",
   "repository": {
@@ -52,8 +64,7 @@
     "prettier": "^3.8.1",
     "tsup": "^8.0.0",
     "typescript": "^5.7.0",
-    "typescript-eslint": "^8.54.0",
-    "@types/proper-lockfile": "^4.1.4"
+    "typescript-eslint": "^8.54.0"
   },
   "engines": {
     "node": ">=20"

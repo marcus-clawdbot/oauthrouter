@@ -180,9 +180,9 @@ export function resolveBearerTokenForProvider(
  *
  * Never logs secrets.
  */
-export function getAnthropicAuthHeader(params?: {
-  authStorePath?: string;
-}): { Authorization: string } {
+export function getAnthropicAuthHeader(params?: { authStorePath?: string }): {
+  Authorization: string;
+} {
   const authStorePath = params?.authStorePath ?? getDefaultOpenClawAgentAuthStorePath();
   const jsonText = readFileSync(authStorePath, "utf-8");
   const store = parseOpenClawAuthProfileStoreJson(jsonText);
