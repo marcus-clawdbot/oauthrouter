@@ -1,0 +1,8 @@
+#!/usr/bin/env sh
+. "$(dirname -- "$0")/_/husky.sh"
+
+# Auto-format before commit to keep CI green.
+# Note: this may modify files; we re-stage everything.
+
+npx prettier --write .
+git add -A
