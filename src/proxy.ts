@@ -24,11 +24,17 @@ import {
   type AnthropicMessagesResponse,
 } from "./adapters/anthropic.js";
 import { normalizeOpenAiChatCompletionsRequest } from "./adapters/openai.js";
+import {
+  buildCodexResponsesRequestFromOpenAIChatCompletions,
+  extractChatGptAccountIdFromJwt,
+} from "./adapters/openai-codex.js";
 import { resolveProviderForModelId, isAutoModelId, type ProviderId } from "./model-registry.js";
 import { route, DEFAULT_ROUTING_CONFIG } from "./router/index.js";
 import type { RoutingConfig } from "./router/types.js";
 import type { ModelPricing } from "./router/selector.js";
 import { BLOCKRUN_MODELS } from "./models.js";
+import { VERSION } from "./version.js";
+import { getOpenAICodexAuthHeader } from "./openclaw-auth-profiles.js";
 
 const DEFAULT_PORT = 8402;
 const DEFAULT_REQUEST_TIMEOUT_MS = 180_000;
@@ -76,6 +82,9 @@ export type UpstreamProviderConfig = {
 };
 
 export type ProxyOptions = {
+  /** Optional override for OpenClaw per-agent auth-profiles.json path (used by openai-codex OAuth refresh). */
+  authStorePath?: string;
+
   /**
    * Legacy single-upstream mode.
    *
@@ -203,6 +212,76 @@ function applyProviderHeaderOverrides(
   }
 
   applyUpstreamAuthHeader(headers, providerConfig.authHeader);
+}
+
+function parseBearerToken(value: string | undefined): string | null {
+  if (!value) return null;
+  const m = value.match(/^\s*Bearer\s+(.+?)\s*$/i);
+  if (m) return m[1].trim();
+  const t = value.trim();
+  return t ? t : null;
+}
+
+function ensureCommaSeparatedIncludes(current: string | undefined, required: string[]): string {
+  const have = new Set(
+    (current ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+  for (const r of required) have.add(r);
+  return Array.from(have).join(",");
+}
+
+/**
+ * ROUTER-012: Anthropic OAuth header mode.
+ *
+ * If the upstream auth token looks like an Anthropic OAuth token (sk-ant-oat...),
+ * send it via Authorization: Bearer and add Claude Code-like headers.
+ * Otherwise, prefer x-api-key.
+ */
+function normalizeAnthropicUpstreamAuthHeaders(headers: Record<string, string>): void {
+  const xApiKey = headers["x-api-key"]?.trim();
+  const authToken = parseBearerToken(headers["authorization"]);
+
+  const token = xApiKey || authToken;
+  const isOauthToken = typeof token === "string" && token.startsWith("sk-ant-oat");
+
+  if (isOauthToken) {
+    // OAuth mode uses Authorization, not x-api-key.
+    headers["authorization"] = `Bearer ${token}`;
+    delete headers["x-api-key"];
+
+    // Claude Code / pi-ai compatibility headers.
+    headers["anthropic-beta"] = ensureCommaSeparatedIncludes(headers["anthropic-beta"], [
+      "claude-code-20250219",
+      "oauth-2025-04-20",
+    ]);
+
+    if (!headers["x-app"]) headers["x-app"] = "cli";
+
+    // Many HTTP clients set a default user-agent (e.g. undici). For OAuth-mode
+    // compatibility we explicitly stamp a Claude CLI-like UA unless one is already.
+    if (
+      !String(headers["user-agent"] ?? "")
+        .toLowerCase()
+        .startsWith("claude-cli/")
+    ) {
+      headers["user-agent"] = "claude-cli/1.0";
+    }
+
+    if (!headers["anthropic-dangerous-direct-browser-access"]) {
+      headers["anthropic-dangerous-direct-browser-access"] = "true";
+    }
+
+    return;
+  }
+
+  // Non-OAuth: Anthropic expects x-api-key.
+  if (!xApiKey && authToken) {
+    headers["x-api-key"] = authToken;
+    delete headers["authorization"];
+  }
 }
 
 type ParsedBody = {
@@ -434,6 +513,18 @@ async function proxyRequest(
     upstreamBody = Buffer.from(JSON.stringify(normalized));
   }
 
+  // openai-codex (chatgpt.com) adapter: OpenAI chat.completions -> Codex responses
+  if (provider === "openai-codex" && isChatCompletions) {
+    if (body.length === 0) throw new Error("Empty request body");
+
+    const openAiReq = JSON.parse(body.toString()) as OpenAIChatCompletionsRequest;
+    if (typeof modelId === "string" && modelId.trim()) openAiReq.model = modelId;
+
+    const codexReq = buildCodexResponsesRequestFromOpenAIChatCompletions(openAiReq);
+    upstreamPath = "/backend-api/codex/responses";
+    upstreamBody = Buffer.from(JSON.stringify(codexReq));
+  }
+
   const upstreamUrl = `${upstreamApiBase}${upstreamPath}`;
 
   const spend = options.spendControls;
@@ -528,16 +619,41 @@ async function proxyRequest(
 
   if (!headers["content-type"]) headers["content-type"] = "application/json";
 
+  if (provider === "openai-codex") {
+    // Required Codex/ChatGPT backend headers (pi-ai compatible)
+    if (!headers["openai-beta"]) headers["openai-beta"] = "responses=experimental";
+    if (!headers["originator"]) headers["originator"] = "pi";
+    // Force SSE accept for Codex backend.
+    headers["accept"] = "text/event-stream";
+    headers["user-agent"] = `pi(oauthrouter/${VERSION})`;
+
+    if (!headers["authorization"]) {
+      const auth = await getOpenAICodexAuthHeader({ authStorePath: options.authStorePath });
+      headers["authorization"] = auth.Authorization;
+    }
+
+    // Derive chatgpt-account-id from the JWT access token.
+    const bearer = headers["authorization"];
+    const m = typeof bearer === "string" ? bearer.match(/^\s*Bearer\s+(.+)\s*$/i) : null;
+    const jwt = m ? m[1] : typeof bearer === "string" ? bearer.trim() : "";
+    const accountId = jwt ? extractChatGptAccountIdFromJwt(jwt) : undefined;
+    if (accountId && !headers["chatgpt-account-id"]) headers["chatgpt-account-id"] = accountId;
+  }
+
   const anthropicMode = provider === "anthropic";
 
   if (anthropicMode && !headers["anthropic-version"]) {
     headers["anthropic-version"] = "2023-06-01";
   }
 
-  if (anthropicMode && !headers["x-api-key"]) {
-    throw new Error(
-      "Anthropic adapter requires an x-api-key header (set options.providers.anthropic.authHeader={name:'x-api-key',value:'...'} or options.upstreamAuthHeader)",
-    );
+  if (anthropicMode) {
+    normalizeAnthropicUpstreamAuthHeaders(headers);
+
+    if (!headers["x-api-key"] && !headers["authorization"]) {
+      throw new Error(
+        "Anthropic adapter requires auth via x-api-key (api key) or Authorization (OAuth: sk-ant-oat...) (set options.providers.anthropic.authHeader or options.upstreamAuthHeader)",
+      );
+    }
   }
 
   const timeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
