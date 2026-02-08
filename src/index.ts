@@ -30,3 +30,16 @@ export type { RoutingDecision, RoutingConfig, Tier } from "./router/index.js";
 export { startProxy } from "./proxy.js";
 export type { ProxyOptions, ProxyHandle } from "./proxy.js";
 export type { SpendControlsConfig } from "./spend-controls.js";
+
+// OpenClaw auth-profiles.json helpers
+export {
+  getAnthropicAuthHeader,
+  getDefaultOpenClawAgentAuthStorePath,
+  parseOpenClawAuthProfileStoreJson,
+  resolveBestProfileIdForProvider,
+  resolveBearerTokenForProvider,
+} from "./openclaw-auth-profiles.js";
+export type {
+  OpenClawAuthProfileStore,
+  OpenClawAuthProfileCredential,
+} from "./openclaw-auth-profiles.js";

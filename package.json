@@ -28,6 +28,7 @@
     "lint": "eslint src/",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "test": "npm run build --silent && node --test test/*.test.mjs",
     "prepare": "husky"
   },
   "keywords": [
@@ -51,8 +52,12 @@
       "optional": true
     }
   },
+  "dependencies": {
+    "proper-lockfile": "^4.1.2"
+  },
   "devDependencies": {
     "@eslint/js": "^9.39.2",
+    "@types/proper-lockfile": "^4.1.4",
     "eslint": "^9.39.2",
     "husky": "^9.1.7",
     "openclaw": "latest",
