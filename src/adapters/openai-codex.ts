@@ -93,7 +93,11 @@ export function buildCodexResponsesRequestFromOpenAIChatCompletions(
 
   if (typeof (req as any).temperature === "number") out.temperature = (req as any).temperature;
   if (typeof (req as any).top_p === "number") out.top_p = (req as any).top_p;
-  if (typeof (req as any).stream === "boolean") out.stream = (req as any).stream;
+
+  // Codex backend requires stream=true. If the caller asked for non-streaming,
+  // OAuthRouter will still request SSE upstream and then aggregate/map back to
+  // a normal OpenAI chat.completion JSON response.
+  out.stream = true;
 
   return out;
 }

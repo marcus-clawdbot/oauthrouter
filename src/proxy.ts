@@ -682,7 +682,13 @@ async function proxyRequest(
         let content = "";
         let upstreamId: string | undefined;
 
-        if (upstreamCt.includes("text/event-stream")) {
+        const looksLikeSse =
+          upstreamCt.includes("text/event-stream") ||
+          raw.startsWith("data:") ||
+          raw.includes("\n\ndata:") ||
+          raw.includes("\nevent:");
+
+        if (looksLikeSse) {
           let completedText: string | undefined;
 
           const re = /^data:\s?(.*)$/gm;
