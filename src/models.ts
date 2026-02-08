@@ -155,7 +155,7 @@ export const BLOCKRUN_MODELS: BlockRunModel[] = [
 
   // Anthropic
   {
-    id: "anthropic/claude-haiku-4.5",
+    id: "anthropic/claude-haiku-4-5",
     name: "Claude Haiku 4.5",
     inputPrice: 1.0,
     outputPrice: 5.0,
@@ -181,7 +181,7 @@ export const BLOCKRUN_MODELS: BlockRunModel[] = [
     reasoning: true,
   },
   {
-    id: "anthropic/claude-opus-4.5",
+    id: "anthropic/claude-opus-4-5",
     name: "Claude Opus 4.5",
     inputPrice: 5.0,
     outputPrice: 25.0,

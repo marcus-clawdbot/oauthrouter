@@ -45,7 +45,7 @@ const DEFAULT_AUTO_ROUTING_CONFIG: RoutingConfig = {
   tiers: {
     SIMPLE: {
       primary: "openai/gpt-4o-mini",
-      fallback: ["anthropic/claude-haiku-4.5"],
+      fallback: ["anthropic/claude-haiku-4-5"],
     },
     MEDIUM: {
       primary: "openai/gpt-4o",
