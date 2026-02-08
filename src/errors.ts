@@ -1,8 +1,9 @@
 /**
- * Typed Error Classes for ClawRouter
+ * Typed Error Classes (legacy)
  *
- * Provides structured errors for balance-related failures with
- * all necessary information for user-friendly error messages.
+ * These errors existed in the upstream ClawRouter codebase for wallet/x402 flows.
+ * OAuthRouter keeps them temporarily to avoid churn, but the wallet payment flow
+ * is disabled and these should not occur in normal operation.
  */
 
 /**
@@ -16,7 +17,7 @@ export class InsufficientFundsError extends Error {
 
   constructor(opts: { currentBalanceUSD: string; requiredUSD: string; walletAddress: string }) {
     super(
-      `Insufficient USDC balance. Current: ${opts.currentBalanceUSD}, Required: ${opts.requiredUSD}. Fund wallet: ${opts.walletAddress}`,
+      `Legacy wallet/x402 flow disabled in oauthrouter (requested ${opts.requiredUSD} USD; current ${opts.currentBalanceUSD}).`,
     );
     this.name = "InsufficientFundsError";
     this.currentBalanceUSD = opts.currentBalanceUSD;
@@ -33,7 +34,7 @@ export class EmptyWalletError extends Error {
   readonly walletAddress: string;
 
   constructor(walletAddress: string) {
-    super(`No USDC balance. Fund wallet to use ClawRouter: ${walletAddress}`);
+    super(`Legacy wallet/x402 flow disabled in oauthrouter: ${walletAddress}`);
     this.name = "EmptyWalletError";
     this.walletAddress = walletAddress;
   }

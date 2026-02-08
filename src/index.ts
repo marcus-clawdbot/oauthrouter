@@ -34,6 +34,9 @@ export type { SpendControlsConfig } from "./spend-controls.js";
 // OpenClaw auth-profiles.json helpers
 export {
   getAnthropicAuthHeader,
+  getAnthropicApiKeyHeader,
+  getOpenAiAuthHeader,
+  getOpenAICodexAuthHeader,
   getDefaultOpenClawAgentAuthStorePath,
   parseOpenClawAuthProfileStoreJson,
   resolveBestProfileIdForProvider,
@@ -42,4 +45,5 @@ export {
 export type {
   OpenClawAuthProfileStore,
   OpenClawAuthProfileCredential,
+  OpenAICodexAuthHeaderResult,
 } from "./openclaw-auth-profiles.js";

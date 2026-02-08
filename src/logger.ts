@@ -2,7 +2,7 @@
  * Usage Logger
  *
  * Logs every LLM request as a JSON line to a daily log file.
- * Files: ~/.openclaw/blockrun/logs/usage-YYYY-MM-DD.jsonl
+ * Files: ~/.openclaw/oauthrouter/logs/usage-YYYY-MM-DD.jsonl
  *
  * MVP: append-only JSON lines. No rotation, no cleanup.
  * Logging never breaks the request flow — all errors are swallowed.
@@ -19,7 +19,7 @@ export type UsageEntry = {
   latencyMs: number;
 };
 
-const LOG_DIR = join(homedir(), ".openclaw", "blockrun", "logs");
+const LOG_DIR = join(homedir(), ".openclaw", "oauthrouter", "logs");
 let dirReady = false;
 
 async function ensureDir(): Promise<void> {

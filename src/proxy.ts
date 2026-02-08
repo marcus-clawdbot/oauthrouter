@@ -23,13 +23,69 @@ import {
   type OpenAIChatCompletionsRequest,
   type AnthropicMessagesResponse,
 } from "./adapters/anthropic.js";
+import { normalizeOpenAiChatCompletionsRequest } from "./adapters/openai.js";
+import { resolveProviderForModelId, isAutoModelId, type ProviderId } from "./model-registry.js";
+import { route, DEFAULT_ROUTING_CONFIG } from "./router/index.js";
+import type { RoutingConfig } from "./router/types.js";
+import type { ModelPricing } from "./router/selector.js";
+import { BLOCKRUN_MODELS } from "./models.js";
 
 const DEFAULT_PORT = 8402;
 const DEFAULT_REQUEST_TIMEOUT_MS = 180_000;
 
-export type ProxyOptions = {
-  /** Upstream base URL (e.g. "https://api.openai.com"). */
+const DEFAULT_AUTO_ROUTING_CONFIG: RoutingConfig = {
+  ...DEFAULT_ROUTING_CONFIG,
+  version: "oauthrouter-auto-1",
+  tiers: {
+    SIMPLE: {
+      primary: "openai/gpt-4o-mini",
+      fallback: ["anthropic/claude-haiku-4.5"],
+    },
+    MEDIUM: {
+      primary: "openai/gpt-4o",
+      fallback: ["anthropic/claude-sonnet-4"],
+    },
+    COMPLEX: {
+      primary: "anthropic/claude-opus-4",
+      fallback: ["openai/gpt-4o"],
+    },
+    REASONING: {
+      primary: "openai/o3",
+      fallback: ["anthropic/claude-sonnet-4"],
+    },
+  },
+};
+
+function buildModelPricingForAuto(): Map<string, ModelPricing> {
+  const map = new Map<string, ModelPricing>();
+  for (const m of BLOCKRUN_MODELS) {
+    const id = m.id;
+    if (!id.startsWith("openai/") && !id.startsWith("anthropic/")) continue;
+    map.set(id, { inputPrice: m.inputPrice, outputPrice: m.outputPrice });
+  }
+  return map;
+}
+
+export type UpstreamProviderConfig = {
+  /** Provider base URL, e.g. "https://api.openai.com" or "https://api.anthropic.com". */
   apiBase: string;
+  /** Optional provider-specific headers added to upstream requests. */
+  headers?: Record<string, string>;
+  /** Optional provider-specific auth header. */
+  authHeader?: { name: string; value: string } | string;
+};
+
+export type ProxyOptions = {
+  /**
+   * Legacy single-upstream mode.
+   *
+   * If `providers` is set, this is ignored.
+   */
+  apiBase?: string;
+
+  /** Multi-upstream mode (ROUTER-007). */
+  providers?: Partial<Record<ProviderId, UpstreamProviderConfig>>;
+
   /** Port to listen on (default: 8402). */
   port?: number;
   /** Request timeout (ms). */
@@ -41,17 +97,18 @@ export type ProxyOptions = {
   /** Optional spend controls (guardrails). */
   spendControls?: SpendControlsConfig;
 
-  /** Optional static headers added to upstream requests. */
+  /** Optional static headers added to upstream requests (applies to all providers). */
   upstreamHeaders?: Record<string, string>;
 
   /**
-   * Upstream auth header to apply when forwarding requests.
+   * Legacy upstream auth header to apply when forwarding requests (applies to all providers).
    *
-   * ROUTER-004 is expected to provide this.
-   * - If a string: treated as an Authorization header value.
-   * - If an object: sets headers[name] = value.
+   * Prefer `providers[provider].authHeader`.
    */
   upstreamAuthHeader?: { name: string; value: string } | string;
+
+  /** Optional routing config when using oauthrouter/auto. */
+  routingConfig?: RoutingConfig;
 
   onReady?: (port: number) => void;
   onError?: (error: Error) => void;
@@ -133,6 +190,21 @@ function applyUpstreamHeaderOverrides(
   applyUpstreamAuthHeader(headers, options.upstreamAuthHeader);
 }
 
+function applyProviderHeaderOverrides(
+  headers: Record<string, string>,
+  providerConfig: UpstreamProviderConfig | undefined,
+): void {
+  if (!providerConfig) return;
+
+  if (providerConfig.headers) {
+    for (const [k, v] of Object.entries(providerConfig.headers)) {
+      if (typeof v === "string") headers[k.toLowerCase()] = v;
+    }
+  }
+
+  applyUpstreamAuthHeader(headers, providerConfig.authHeader);
+}
+
 type ParsedBody = {
   model?: string;
   max_tokens?: number;
@@ -157,8 +229,10 @@ function estimateInputTokensFromBody(body: Buffer, parsed?: ParsedBody): number 
  * Start the local proxy.
  */
 export async function startProxy(options: ProxyOptions): Promise<ProxyHandle> {
-  const apiBase = options.apiBase;
-  if (!apiBase) throw new Error("oauthrouter: startProxy() requires apiBase");
+  const apiBase = options.providers ? null : (options.apiBase ?? null);
+  if (!options.providers && !apiBase) {
+    throw new Error("oauthrouter: startProxy() requires apiBase (or options.providers)");
+  }
 
   const authToken = options.authToken ?? randomBytes(32).toString("base64url");
   const budgetTracker = new DailyBudgetTracker();
@@ -182,7 +256,7 @@ export async function startProxy(options: ProxyOptions): Promise<ProxyHandle> {
     }
 
     try {
-      await proxyRequest(req, res, apiBase, options, budgetTracker);
+      await proxyRequest(req, res, options, budgetTracker);
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
       options.onError?.(error);
@@ -223,7 +297,6 @@ export async function startProxy(options: ProxyOptions): Promise<ProxyHandle> {
 async function proxyRequest(
   req: IncomingMessage,
   res: ServerResponse,
-  apiBase: string,
   options: ProxyOptions,
   budgetTracker: DailyBudgetTracker,
 ): Promise<void> {
@@ -236,6 +309,64 @@ async function proxyRequest(
   }
   const body = Buffer.concat(chunks);
 
+  // Parse model/max_tokens when possible
+  let parsed: ParsedBody | undefined;
+  let modelId: string | undefined;
+  let maxTokens = 4096;
+  if (body.length > 0) {
+    try {
+      parsed = JSON.parse(body.toString()) as ParsedBody;
+      if (typeof parsed.model === "string") modelId = parsed.model;
+      if (typeof parsed.max_tokens === "number") maxTokens = parsed.max_tokens;
+    } catch {
+      // ignore
+    }
+  }
+
+  const isChatCompletions =
+    originalPath === "/v1/chat/completions" || originalPath.startsWith("/v1/chat/completions?");
+
+  // --- oauthrouter/auto ---
+  if (isChatCompletions && modelId && isAutoModelId(modelId)) {
+    const messages = Array.isArray(parsed?.messages) ? parsed?.messages : [];
+    const systemPrompt = messages
+      .filter((m) => m?.role === "system")
+      .map((m) => (typeof m?.content === "string" ? m.content : ""))
+      .join("\n\n");
+
+    const prompt = messages
+      .filter((m) => m?.role === "user")
+      .map((m) => (typeof m?.content === "string" ? m.content : ""))
+      .join("\n\n");
+
+    const modelPricing = buildModelPricingForAuto();
+    const decision = route(prompt, systemPrompt || undefined, maxTokens, {
+      config: options.routingConfig ?? DEFAULT_AUTO_ROUTING_CONFIG,
+      modelPricing,
+    });
+
+    modelId = decision.model;
+    if (parsed) {
+      parsed.model = decision.model;
+    }
+  }
+
+  // Determine upstream provider/base
+  const providerFromModel = modelId ? resolveProviderForModelId(modelId) : null;
+  const provider: ProviderId | null = options.providers
+    ? providerFromModel
+    : options.apiBase
+      ? isAnthropicApiBase(options.apiBase)
+        ? "anthropic"
+        : "openai"
+      : providerFromModel;
+
+  const upstreamConfig = provider && options.providers ? options.providers[provider] : undefined;
+  const upstreamApiBase = upstreamConfig?.apiBase ?? options.apiBase;
+  if (!upstreamApiBase) {
+    throw new Error("No upstream apiBase configured");
+  }
+
   // Upstream defaults (passthrough)
   let upstreamPath = originalPath;
   let upstreamBody = body;
@@ -245,17 +376,15 @@ async function proxyRequest(
       ) => Promise<{ status: number; headers: Record<string, string>; body: Buffer }>)
     | undefined;
 
-  // Adapter: OpenAI chat.completions -> Anthropic messages
-  const anthropicMode = isAnthropicApiBase(apiBase);
-  const isChatCompletions =
-    originalPath === "/v1/chat/completions" || originalPath.startsWith("/v1/chat/completions?");
-
-  if (anthropicMode && isChatCompletions) {
+  // Provider adapters
+  if (provider === "anthropic" && isChatCompletions) {
     if (body.length === 0) throw new Error("Empty request body");
 
     const openAiReq = JSON.parse(body.toString()) as OpenAIChatCompletionsRequest;
-    const anthropicReq = buildAnthropicMessagesRequestFromOpenAI(openAiReq);
+    // If auto rewrote the model in `parsed`, keep the raw request consistent.
+    if (typeof modelId === "string" && modelId.trim()) openAiReq.model = modelId;
 
+    const anthropicReq = buildAnthropicMessagesRequestFromOpenAI(openAiReq);
     upstreamPath = "/v1/messages";
     upstreamBody = Buffer.from(JSON.stringify(anthropicReq));
 
@@ -298,21 +427,14 @@ async function proxyRequest(
     };
   }
 
-  const upstreamUrl = `${apiBase}${upstreamPath}`;
-
-  // Parse model/max_tokens when possible
-  let parsed: ParsedBody | undefined;
-  let modelId: string | undefined;
-  let maxTokens = 4096;
-  if (body.length > 0) {
-    try {
-      parsed = JSON.parse(body.toString()) as ParsedBody;
-      if (typeof parsed.model === "string") modelId = parsed.model;
-      if (typeof parsed.max_tokens === "number") maxTokens = parsed.max_tokens;
-    } catch {
-      // ignore
-    }
+  if (provider === "openai" && isChatCompletions && body.length > 0) {
+    const openAiReq = JSON.parse(body.toString()) as OpenAIChatCompletionsRequest;
+    if (typeof modelId === "string" && modelId.trim()) openAiReq.model = modelId;
+    const normalized = normalizeOpenAiChatCompletionsRequest(openAiReq);
+    upstreamBody = Buffer.from(JSON.stringify(normalized));
   }
+
+  const upstreamUrl = `${upstreamApiBase}${upstreamPath}`;
 
   const spend = options.spendControls;
 
@@ -402,8 +524,11 @@ async function proxyRequest(
   }
 
   applyUpstreamHeaderOverrides(headers, options);
+  applyProviderHeaderOverrides(headers, upstreamConfig);
 
   if (!headers["content-type"]) headers["content-type"] = "application/json";
+
+  const anthropicMode = provider === "anthropic";
 
   if (anthropicMode && !headers["anthropic-version"]) {
     headers["anthropic-version"] = "2023-06-01";
@@ -411,7 +536,7 @@ async function proxyRequest(
 
   if (anthropicMode && !headers["x-api-key"]) {
     throw new Error(
-      "Anthropic adapter requires an x-api-key header (set options.upstreamAuthHeader={name:'x-api-key',value:'...'} or options.upstreamHeaders.x-api-key)",
+      "Anthropic adapter requires an x-api-key header (set options.providers.anthropic.authHeader={name:'x-api-key',value:'...'} or options.upstreamAuthHeader)",
     );
   }
 

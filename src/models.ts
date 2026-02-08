@@ -1,11 +1,11 @@
 /**
- * BlockRun Model Definitions for OpenClaw
+ * Model Definitions (legacy list)
  *
- * Maps BlockRun's 30+ AI models to OpenClaw's ModelDefinitionConfig format.
- * All models use the "openai-completions" API since BlockRun is OpenAI-compatible.
+ * This file started as a BlockRun/ClawRouter model catalog. OAuthRouter uses it
+ * (for now) only as a convenient place to keep a list of model IDs + rough
+ * pricing metadata for routing heuristics.
  *
- * Pricing is in USD per 1M tokens. Operators pay these rates via x402;
- * they set their own markup when reselling to end users (Phase 2).
+ * NOTE: OAuthRouter does NOT implement wallet/x402 payments.
  */
 
 import type { ModelDefinitionConfig, ModelProviderConfig } from "./types.js";
@@ -23,7 +23,7 @@ type BlockRunModel = {
 
 export const BLOCKRUN_MODELS: BlockRunModel[] = [
   // Smart routing meta-model — proxy replaces with actual model
-  // NOTE: Model IDs are WITHOUT provider prefix (OpenClaw adds "blockrun/" automatically)
+  // NOTE: Model IDs here are the canonical IDs the router uses (often provider-prefixed).
   {
     id: "auto",
     name: "BlockRun Smart Router",
