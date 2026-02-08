@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 
-import { startProxy } from "../dist/index.js";
+import { startProxy, DEFAULT_ROUTING_CONFIG } from "../dist/index.js";
 
 function readJson(req) {
   return new Promise((resolve, reject) => {
@@ -85,7 +85,7 @@ test("routes openai/* models to OpenAI upstream and strips local auth", async ()
   }
 });
 
-test("oauthrouter/auto routes to an OpenAI model (smoke)", async () => {
+test("oauthrouter/auto routes via routingConfig (smoke)", async () => {
   const seen = { model: null };
 
   const upstream = createServer(async (req, res) => {
@@ -120,6 +120,14 @@ test("oauthrouter/auto routes to an OpenAI model (smoke)", async () => {
         authHeader: { name: "Authorization", value: "Bearer OPENAI_TOKEN" },
       },
     },
+    routingConfig: {
+      ...DEFAULT_ROUTING_CONFIG,
+      version: "test-auto-openai",
+      tiers: {
+        ...DEFAULT_ROUTING_CONFIG.tiers,
+        SIMPLE: { primary: "openai/gpt-4o-mini", fallback: [] },
+      },
+    },
   });
 
   try {
@@ -140,7 +148,6 @@ test("oauthrouter/auto routes to an OpenAI model (smoke)", async () => {
     const json = await rsp.json();
     assert.equal(json.choices?.[0]?.message?.content, "auto-ok");
 
-    // Default auto config selects openai/gpt-4o-mini for SIMPLE.
     assert.equal(seen.model, "gpt-4o-mini");
   } finally {
     await proxy.close();

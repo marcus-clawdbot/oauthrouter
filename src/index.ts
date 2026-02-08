@@ -31,6 +31,10 @@ export { startProxy } from "./proxy.js";
 export type { ProxyOptions, ProxyHandle } from "./proxy.js";
 export type { SpendControlsConfig } from "./spend-controls.js";
 
+// Debug / routing trace exports (primarily for tests)
+export { RingBuffer, RoutingTraceStore, routingTrace } from "./routing-trace.js";
+export type { TraceEvent } from "./routing-trace.js";
+
 // OpenClaw auth-profiles.json helpers
 export {
   getAnthropicAuthHeader,

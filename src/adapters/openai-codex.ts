@@ -9,6 +9,23 @@
 
 import type { OpenAIChatCompletionsRequest } from "./anthropic.js";
 
+function coerceStringContent(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    const parts: string[] = [];
+    for (const p of content) {
+      if (!p || typeof p !== "object") continue;
+      const type = (p as { type?: unknown }).type;
+      if (type === "text" || type === "input_text") {
+        const text = (p as { text?: unknown }).text;
+        if (typeof text === "string") parts.push(text);
+      }
+    }
+    if (parts.length > 0) return parts.join("");
+  }
+  return "";
+}
+
 export function toOpenAICodexModelId(routerModelId: string): string {
   if (routerModelId.startsWith("openai-codex/")) return routerModelId.slice("openai-codex/".length);
   return routerModelId;
@@ -67,15 +84,18 @@ export function buildCodexResponsesRequestFromOpenAIChatCompletions(
         .filter((m) => m && typeof m.role === "string")
         .flatMap((m) => {
           const role = String(m.role);
-          const text = typeof m.content === "string" ? m.content : "";
+          const text = coerceStringContent(m.content);
 
           if (role === "system") {
             if (text.trim()) systemParts.push(text.trim());
             return [];
           }
 
-          if (role === "user" || role === "assistant") {
+          if (role === "user") {
             return [{ role, content: [{ type: "input_text" as const, text }] }];
+          }
+          if (role === "assistant") {
+            return [{ role, content: [{ type: "output_text" as const, text }] }];
           }
 
           return [];

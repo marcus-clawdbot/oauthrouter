@@ -14,6 +14,17 @@ export type OpenAIChatMessage = {
   content: unknown;
 };
 
+export type OpenAIToolCallFunction = {
+  name: string;
+  arguments: string;
+};
+
+export type OpenAIToolCall = {
+  id: string;
+  type: "function";
+  function: OpenAIToolCallFunction;
+};
+
 export type OpenAIChatCompletionsRequest = {
   model?: string;
   messages?: OpenAIChatMessage[];
@@ -22,14 +33,35 @@ export type OpenAIChatCompletionsRequest = {
   top_p?: number;
   stop?: string | string[];
   stream?: boolean;
+  tools?: Array<{
+    type: string;
+    function: { name: string; description?: string; parameters?: Record<string, unknown> };
+  }>;
+  tool_choice?: "auto" | "none" | "required" | { type: "function"; function: { name: string } };
   [key: string]: unknown;
 };
 
 export type AnthropicTextBlock = { type: "text"; text: string };
+export type AnthropicToolUseBlock = { type: "tool_use"; id: string; name: string; input: unknown };
+export type AnthropicToolResultBlock = {
+  type: "tool_result";
+  tool_use_id: string;
+  content: string;
+};
+export type AnthropicContentBlock =
+  | AnthropicTextBlock
+  | AnthropicToolUseBlock
+  | AnthropicToolResultBlock;
+
+export type AnthropicTool = {
+  name: string;
+  description?: string;
+  input_schema: Record<string, unknown>;
+};
 
 export type AnthropicMessage = {
   role: "user" | "assistant";
-  content: AnthropicTextBlock[];
+  content: AnthropicContentBlock[];
 };
 
 export type AnthropicMessagesRequest = {
@@ -41,6 +73,8 @@ export type AnthropicMessagesRequest = {
   top_p?: number;
   stop_sequences?: string[];
   metadata?: unknown;
+  tools?: AnthropicTool[];
+  tool_choice?: { type: string; name?: string };
 };
 
 export type AnthropicMessagesResponse = {
@@ -63,7 +97,7 @@ function coerceStringContent(content: unknown): string {
     for (const p of content) {
       if (!p || typeof p !== "object") continue;
       const type = (p as { type?: unknown }).type;
-      if (type === "text") {
+      if (type === "text" || type === "input_text" || type === "output_text") {
         const text = (p as { text?: unknown }).text;
         if (typeof text === "string") parts.push(text);
       }
@@ -109,12 +143,57 @@ export function buildAnthropicMessagesRequestFromOpenAI(
       continue;
     }
 
-    if (role === "user" || role === "assistant") {
-      messages.push({ role, content: [{ type: "text", text }] });
+    if (role === "tool") {
+      // OpenAI tool result → Anthropic tool_result inside a user message
+      const toolCallId = typeof (m as any).tool_call_id === "string" ? (m as any).tool_call_id : "";
+      const resultContent = text || "";
+      messages.push({
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: toolCallId, content: resultContent }],
+      });
       continue;
     }
 
-    // Unknown roles ignored in v0.
+    if (role === "assistant") {
+      const contentBlocks: AnthropicContentBlock[] = [];
+      if (text) {
+        contentBlocks.push({ type: "text", text });
+      }
+      // Convert OpenAI tool_calls to Anthropic tool_use blocks
+      const toolCalls = Array.isArray((m as any).tool_calls) ? (m as any).tool_calls : [];
+      for (const tc of toolCalls) {
+        if (!tc || typeof tc !== "object") continue;
+        const fn = tc.function;
+        if (!fn || typeof fn !== "object") continue;
+        let parsedInput: unknown = {};
+        if (typeof fn.arguments === "string") {
+          try {
+            parsedInput = JSON.parse(fn.arguments);
+          } catch {
+            parsedInput = {};
+          }
+        }
+        contentBlocks.push({
+          type: "tool_use",
+          id: typeof tc.id === "string" ? tc.id : `toolu_${Date.now()}`,
+          name: typeof fn.name === "string" ? fn.name : "",
+          input: parsedInput,
+        });
+      }
+      if (contentBlocks.length === 0) {
+        contentBlocks.push({ type: "text", text: "..." });
+      }
+      messages.push({ role: "assistant", content: contentBlocks });
+      continue;
+    }
+
+    if (role === "user") {
+      const content = text || "(empty message)";
+      messages.push({ role, content: [{ type: "text", text: content }] });
+      continue;
+    }
+
+    // Unknown roles ignored.
   }
 
   const maxTokens =
@@ -143,18 +222,45 @@ export function buildAnthropicMessagesRequestFromOpenAI(
   if (stopSequences && stopSequences.length > 0) out.stop_sequences = stopSequences;
   if (req.metadata !== undefined) out.metadata = req.metadata;
 
+  // Convert OpenAI tools → Anthropic tools
+  if (Array.isArray(req.tools) && req.tools.length > 0) {
+    const toolChoice = req.tool_choice;
+
+    // If tool_choice is "none", don't send tools at all
+    if (toolChoice !== "none") {
+      out.tools = req.tools
+        .filter((t) => t && t.type === "function" && t.function)
+        .map((t) => ({
+          name: t.function.name,
+          ...(t.function.description ? { description: t.function.description } : {}),
+          input_schema: t.function.parameters ?? { type: "object", properties: {} },
+        }));
+
+      if (typeof toolChoice === "string") {
+        if (toolChoice === "required") {
+          out.tool_choice = { type: "any" };
+        } else if (toolChoice === "auto") {
+          out.tool_choice = { type: "auto" };
+        }
+      } else if (toolChoice && typeof toolChoice === "object" && toolChoice.type === "function") {
+        out.tool_choice = { type: "tool", name: toolChoice.function.name };
+      }
+    }
+  }
+
   return out;
 }
 
 function anthropicStopReasonToOpenAiFinishReason(
   stop: string | null | undefined,
-): "stop" | "length" | "content_filter" | null {
+): "stop" | "length" | "content_filter" | "tool_calls" | null {
   if (!stop) return null;
   switch (stop) {
     case "end_turn":
     case "stop_sequence":
-    case "tool_use":
       return "stop";
+    case "tool_use":
+      return "tool_calls";
     case "max_tokens":
       return "length";
     default:
@@ -172,8 +278,31 @@ export function anthropicMessagesResponseToOpenAIChatCompletion(
     .map((b) => (typeof b.text === "string" ? b.text : ""))
     .join("");
 
+  // Extract tool_use blocks → OpenAI tool_calls
+  const toolCalls: OpenAIToolCall[] = blocks
+    .filter(
+      (b): b is { type: string; id: string; name: string; input: unknown } =>
+        b != null && b.type === "tool_use",
+    )
+    .map((b) => ({
+      id: b.id,
+      type: "function" as const,
+      function: {
+        name: b.name,
+        arguments: JSON.stringify(b.input ?? {}),
+      },
+    }));
+
   const input = rsp.usage?.input_tokens ?? 0;
   const output = rsp.usage?.output_tokens ?? 0;
+
+  const message: Record<string, unknown> = {
+    role: "assistant",
+    content: text || null,
+  };
+  if (toolCalls.length > 0) {
+    message.tool_calls = toolCalls;
+  }
 
   return {
     id: rsp.id ?? `chatcmpl_${Date.now()}`,
@@ -183,7 +312,7 @@ export function anthropicMessagesResponseToOpenAIChatCompletion(
     choices: [
       {
         index: 0,
-        message: { role: "assistant", content: text },
+        message,
         finish_reason: anthropicStopReasonToOpenAiFinishReason(rsp.stop_reason),
       },
     ],
