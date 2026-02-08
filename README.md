@@ -26,6 +26,10 @@ const decision = route("Summarize this article");
 console.log(decision);
 ```
 
+## OpenClaw integration
+
+See: `docs/openclaw-runbook.md`
+
 ## Development
 
 ```bash
