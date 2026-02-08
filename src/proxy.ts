@@ -72,6 +72,85 @@ function buildModelPricingForAuto(): Map<string, ModelPricing> {
   return map;
 }
 
+type SseDataFrame = { data: string };
+
+async function* readSseDataFrames(body: ReadableStream<Uint8Array>): AsyncGenerator<SseDataFrame> {
+  const decoder = new TextDecoder();
+  let buf = "";
+
+  const reader = body.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+
+      while (true) {
+        const sep = buf.indexOf("\n\n");
+        if (sep === -1) break;
+        const frameRaw = buf.slice(0, sep);
+        buf = buf.slice(sep + 2);
+
+        for (const line of frameRaw.split(/\n/)) {
+          const m = line.match(/^data:\s?(.*)$/);
+          if (!m) continue;
+          const data = (m[1] ?? "").trimEnd();
+          if (!data) continue;
+          yield { data };
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const tail = buf.trim();
+  if (tail) {
+    for (const line of tail.split(/\n/)) {
+      const m = line.match(/^data:\s?(.*)$/);
+      if (!m) continue;
+      const data = (m[1] ?? "").trimEnd();
+      if (!data) continue;
+      yield { data };
+    }
+  }
+}
+
+function tryParseJson<T>(s: string): T | undefined {
+  try {
+    return JSON.parse(s) as T;
+  } catch {
+    return undefined;
+  }
+}
+
+function extractOutputTextFromCodexResponsesPayload(payload: any): string | undefined {
+  if (!payload || typeof payload !== "object") return undefined;
+
+  const rsp = (payload as any).response;
+  if (rsp && typeof rsp === "object") {
+    if (typeof (rsp as any).output_text === "string") return (rsp as any).output_text;
+
+    const out = (rsp as any).output;
+    if (Array.isArray(out)) {
+      const texts: string[] = [];
+      for (const item of out) {
+        const content = item?.content;
+        if (!Array.isArray(content)) continue;
+        for (const part of content) {
+          if (part?.type === "output_text" && typeof part?.text === "string") {
+            texts.push(part.text);
+          }
+        }
+      }
+      if (texts.length) return texts.join("");
+    }
+  }
+
+  if (typeof (payload as any).output_text === "string") return (payload as any).output_text;
+  return undefined;
+}
+
 export type UpstreamProviderConfig = {
   /** Provider base URL, e.g. "https://api.openai.com" or "https://api.anthropic.com". */
   apiBase: string;
@@ -454,6 +533,9 @@ async function proxyRequest(
         upstream: Response,
       ) => Promise<{ status: number; headers: Record<string, string>; body: Buffer }>)
     | undefined;
+  let responseStreamMapper:
+    | ((upstream: Response, res: ServerResponse) => Promise<void>)
+    | undefined;
 
   // Provider adapters
   if (provider === "anthropic" && isChatCompletions) {
@@ -520,9 +602,165 @@ async function proxyRequest(
     const openAiReq = JSON.parse(body.toString()) as OpenAIChatCompletionsRequest;
     if (typeof modelId === "string" && modelId.trim()) openAiReq.model = modelId;
 
+    const clientStream = Boolean((openAiReq as any).stream);
+    const requestedModel = typeof openAiReq.model === "string" ? openAiReq.model : undefined;
+
     const codexReq = buildCodexResponsesRequestFromOpenAIChatCompletions(openAiReq);
     upstreamPath = "/backend-api/codex/responses";
     upstreamBody = Buffer.from(JSON.stringify(codexReq));
+
+    if (clientStream) {
+      responseStreamMapper = async (upstream, nodeRes) => {
+        const upstreamCt = upstream.headers.get("content-type") ?? "";
+
+        if (!upstream.ok) {
+          const raw = await upstream.text();
+          nodeRes.writeHead(upstream.status, {
+            "content-type": upstreamCt || "application/json",
+          });
+          nodeRes.end(raw);
+          return;
+        }
+
+        nodeRes.writeHead(200, {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache, no-transform",
+        });
+
+        if (!upstream.body) {
+          nodeRes.write("data: [DONE]\n\n");
+          nodeRes.end();
+          return;
+        }
+
+        const created = Math.floor(Date.now() / 1000);
+        const idFallback = `chatcmpl_${randomBytes(12).toString("hex")}`;
+        let id = idFallback;
+
+        for await (const frame of readSseDataFrames(upstream.body)) {
+          if (frame.data === "[DONE]") break;
+
+          const payload = tryParseJson<any>(frame.data);
+          if (!payload) continue;
+
+          const rsp = payload.response;
+          if (rsp && typeof rsp === "object" && typeof rsp.id === "string" && rsp.id.trim()) {
+            id = rsp.id.trim();
+          }
+
+          const type = typeof payload.type === "string" ? payload.type : "";
+          if (type === "response.output_text.delta" && typeof payload.delta === "string") {
+            const chunk = {
+              id,
+              object: "chat.completion.chunk",
+              created,
+              model: requestedModel,
+              choices: [{ index: 0, delta: { content: payload.delta } }],
+            };
+            nodeRes.write(`data: ${JSON.stringify(chunk)}\n\n`);
+          }
+
+          // Ignore tool/reasoning/metadata events.
+        }
+
+        nodeRes.write("data: [DONE]\n\n");
+        nodeRes.end();
+      };
+    } else {
+      responseMapper = async (upstream) => {
+        const upstreamCt = upstream.headers.get("content-type") ?? "application/json";
+        const raw = await upstream.text();
+
+        if (!upstream.ok) {
+          return {
+            status: upstream.status,
+            headers: { "content-type": upstreamCt },
+            body: Buffer.from(raw),
+          };
+        }
+
+        let content = "";
+        let upstreamId: string | undefined;
+
+        const looksLikeSse =
+          upstreamCt.includes("text/event-stream") ||
+          raw.startsWith("data:") ||
+          raw.includes("\n\ndata:") ||
+          raw.includes("\nevent:");
+
+        if (looksLikeSse) {
+          let completedText: string | undefined;
+
+          const re = /^data:\s?(.*)$/gm;
+          let match: RegExpExecArray | null;
+          while ((match = re.exec(raw))) {
+            const data = (match[1] ?? "").trim();
+            if (!data || data === "[DONE]") continue;
+
+            const payload = tryParseJson<any>(data);
+            if (!payload) continue;
+
+            const rsp = payload.response;
+            if (rsp && typeof rsp === "object" && typeof rsp.id === "string") upstreamId = rsp.id;
+
+            const type = typeof payload.type === "string" ? payload.type : "";
+            if (type === "response.output_text.delta" && typeof payload.delta === "string") {
+              content += payload.delta;
+            }
+
+            const extracted = extractOutputTextFromCodexResponsesPayload(payload);
+            if (typeof extracted === "string") completedText = extracted;
+          }
+
+          if (typeof completedText === "string") content = completedText;
+        } else {
+          const json = tryParseJson<any>(raw);
+          if (!json) {
+            return {
+              status: 502,
+              headers: { "content-type": "application/json" },
+              body: Buffer.from(
+                JSON.stringify({
+                  error: {
+                    message: "openai-codex upstream returned non-JSON",
+                    type: "upstream_error",
+                  },
+                }),
+              ),
+            };
+          }
+
+          upstreamId = typeof json.id === "string" ? json.id : upstreamId;
+          content =
+            (typeof json.output_text === "string" && json.output_text) ||
+            extractOutputTextFromCodexResponsesPayload({ response: json }) ||
+            "";
+        }
+
+        const created = Math.floor(Date.now() / 1000);
+        const id = upstreamId || `chatcmpl_${randomBytes(12).toString("hex")}`;
+
+        const mapped = {
+          id,
+          object: "chat.completion",
+          created,
+          model: requestedModel,
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content },
+              finish_reason: "stop",
+            },
+          ],
+        };
+
+        return {
+          status: 200,
+          headers: { "content-type": "application/json" },
+          body: Buffer.from(JSON.stringify(mapped)),
+        };
+      };
+    }
   }
 
   const upstreamUrl = `${upstreamApiBase}${upstreamPath}`;
@@ -670,7 +908,9 @@ async function proxyRequest(
 
     clearTimeout(timeoutId);
 
-    if (responseMapper) {
+    if (responseStreamMapper) {
+      await responseStreamMapper(upstream, res);
+    } else if (responseMapper) {
       const mapped = await responseMapper(upstream);
       res.writeHead(mapped.status, mapped.headers);
       res.end(mapped.body);

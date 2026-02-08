@@ -58,7 +58,7 @@ test("routes openai-codex/* models to /backend-api/codex/responses and sets requ
     seen.model = body.model;
 
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: true }));
+    res.end(JSON.stringify({ id: "resp_test_1", output_text: "ok" }));
   });
 
   await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
@@ -117,7 +117,8 @@ test("routes openai-codex/* models to /backend-api/codex/responses and sets requ
 
     assert.equal(rsp.status, 200);
     const json = await rsp.json();
-    assert.equal(json.ok, true);
+    assert.equal(json.object, "chat.completion");
+    assert.equal(json.choices?.[0]?.message?.content, "ok");
 
     assert.equal(seen.path, "/backend-api/codex/responses");
     assert.equal(seen.model, "gpt-5.2-codex");
