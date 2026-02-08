@@ -27,7 +27,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "prepare": "husky"
   },
   "keywords": [
     "oauth",
@@ -53,6 +54,7 @@
   "devDependencies": {
     "@eslint/js": "^9.39.2",
     "eslint": "^9.39.2",
+    "husky": "^9.1.7",
     "openclaw": "latest",
     "prettier": "^3.8.1",
     "tsup": "^8.0.0",
