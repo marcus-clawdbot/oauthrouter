@@ -75,9 +75,18 @@ function coerceStringContent(content: unknown): string {
 }
 
 export function toAnthropicModelId(openAiModel: string): string {
-  // Router model ids are typically provider-prefixed: "anthropic/<model>"
-  if (openAiModel.startsWith("anthropic/")) return openAiModel.slice("anthropic/".length);
-  return openAiModel;
+  // Router model ids are typically provider-prefixed: "anthropic/<model>".
+  // Normalize common alias formats to Anthropic-accepted IDs.
+  //
+  // ROUTER-014: Anthropic model ID normalization.
+  // Anthropic uses dashed versions (e.g. claude-haiku-4-5). Some callers
+  // send dotted versions (claude-haiku-4.5) which 404 upstream.
+  const raw = openAiModel.startsWith("anthropic/")
+    ? openAiModel.slice("anthropic/".length)
+    : openAiModel;
+
+  // Normalize: claude-{haiku|sonnet|opus}-4.5 -> claude-*-4-5
+  return raw.replace(/\b(claude-(?:haiku|sonnet|opus)-4)\.5\b/g, "$1-5");
 }
 
 export function buildAnthropicMessagesRequestFromOpenAI(

@@ -59,11 +59,15 @@ function todayUtc(): string {
 }
 
 export function normalizeModelId(modelId: string): string {
-  return modelId
+  const base = modelId
     .trim()
     .toLowerCase()
     .replace(/^oauthrouter\//, "")
     .replace(/^blockrun\//, "");
+
+  // ROUTER-014: Accept Anthropic dotted aliases (e.g. claude-haiku-4.5)
+  // as equivalent to dashed Anthropic IDs (claude-haiku-4-5).
+  return base.replace(/\b(anthropic\/claude-(?:haiku|sonnet|opus)-4)\.5\b/g, "$1-5");
 }
 
 /**
