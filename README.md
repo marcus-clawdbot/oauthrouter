@@ -232,6 +232,32 @@ curl "http://127.0.0.1:8402/debug/routing-trace/stream?token=<token>"
 
 Trace events are also persisted to `~/.openclaw/oauthrouter/logs/routing-trace.jsonl`.
 
+### View Dashboard From Another Laptop (Recommended: SSH Port Forward)
+
+Keep the proxy bound to localhost (default) and forward the port over SSH.
+
+1. On your laptop:
+
+```bash
+ssh -L 8402:127.0.0.1:8402 <user>@<mac-mini-host>
+```
+
+2. In your laptop browser:
+
+```text
+http://127.0.0.1:8402/debug/dashboard?token=<your-auth-token>
+```
+
+### Optional: Bind Proxy To LAN (Not Recommended)
+
+If you really want direct LAN access, bind the proxy to all interfaces:
+
+```bash
+OAUTHROUTER_LISTEN_HOST=0.0.0.0 OAUTHROUTER_PORT=8402 node scripts/openclaw-proxy.mjs
+```
+
+This exposes the port on your network. The proxy is token-gated, but you should still prefer SSH forwarding.
+
 ## OpenClaw Integration
 
 OAuthRouter is designed as an OpenClaw plugin. See [docs/openclaw-runbook.md](docs/openclaw-runbook.md) for full setup instructions.

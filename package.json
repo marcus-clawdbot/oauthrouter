@@ -28,7 +28,9 @@
     "lint": "eslint src/",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "npm run build --silent && node --test test/*.test.mjs",
+    "test:unit": "npm run build --silent && node --test --experimental-test-coverage --test-coverage-lines=45 --test-coverage-functions=40 --test-coverage-branches=30 test/unit/*.test.mjs",
+    "test:integration": "npm run build --silent && node --test test/*.test.mjs",
+    "test": "npm run test:unit",
     "prepare": "husky"
   },
   "keywords": [

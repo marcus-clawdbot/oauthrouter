@@ -18,6 +18,9 @@ export type TraceEvent = {
 
   modelIdRequested?: string;
   modelIdResolved?: string;
+  // The final model id that was actually sent upstream (after pre-routing / fallback rewrites).
+  // This is what the dashboard should treat as "routed".
+  modelIdRouted?: string;
   routingTier?: string;
   routingConfidence?: number;
   routingReasoning?: string;
@@ -28,6 +31,33 @@ export type TraceEvent = {
   latencyMs?: number;
   stream?: boolean;
 
+  // Provider-aware fallback metadata (e.g., Anthropic 429 -> DeepSeek).
+  fallback?: {
+    triggered: boolean;
+    attempts?: Array<{
+      fromProvider?: string;
+      toProvider?: string;
+      fromStatus?: number;
+      toStatus?: number;
+      requestedModel?: string;
+      fallbackModel?: string;
+    }>;
+    requestedModel?: string;
+    fallbackModel?: string;
+  };
+
+  // Provider health / pre-routing metadata.
+  tier?: string;
+  preRoute?: {
+    triggered: boolean;
+    fromProvider?: string;
+    toProvider?: string;
+    requestedModel?: string;
+    routedModel?: string;
+    reason?: string;
+  };
+
+  toolCount?: number;
   spend?: SpendDecision;
   errorMessage?: string;
 };

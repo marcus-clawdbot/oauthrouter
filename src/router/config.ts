@@ -8,6 +8,7 @@
  */
 
 import type { RoutingConfig } from "./types.js";
+import { FALLBACK_MODELS } from "../fallback-config.js";
 
 export const DEFAULT_ROUTING_CONFIG: RoutingConfig = {
   version: "2.0",
@@ -447,19 +448,20 @@ export const DEFAULT_ROUTING_CONFIG: RoutingConfig = {
   tiers: {
     SIMPLE: {
       primary: "anthropic/claude-haiku-4-5",
-      fallback: ["openai-codex/gpt-5.2", "openai-codex/gpt-5.2-codex"],
+      // Prefer the smaller Codex model for SIMPLE to control cost and verbosity.
+      fallback: [FALLBACK_MODELS["openai-codex"].SIMPLE],
     },
     MEDIUM: {
       primary: "openai-codex/gpt-5.2-codex",
-      fallback: ["anthropic/claude-sonnet-4-5", "openai-codex/gpt-5.2"],
+      fallback: ["anthropic/claude-sonnet-4-5", FALLBACK_MODELS["openai-codex"].MEDIUM],
     },
     COMPLEX: {
       primary: "anthropic/claude-sonnet-4-5",
-      fallback: ["anthropic/claude-opus-4-5", "openai-codex/gpt-5.3-codex"],
+      fallback: ["anthropic/claude-opus-4-5", FALLBACK_MODELS["openai-codex"].COMPLEX],
     },
     REASONING: {
       primary: "anthropic/claude-opus-4-6",
-      fallback: ["anthropic/claude-opus-4-5", "openai-codex/gpt-5.3-codex"],
+      fallback: ["anthropic/claude-opus-4-5", FALLBACK_MODELS["openai-codex"].REASONING],
     },
   },
 

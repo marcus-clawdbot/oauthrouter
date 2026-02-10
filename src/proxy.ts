@@ -9,6 +9,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { randomBytes } from "node:crypto";
+import { appendFile, mkdir } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 import { constantTimeTokenEquals } from "./proxy-token.js";
 import { routingTrace, type TraceEvent } from "./routing-trace.js";
@@ -30,6 +33,8 @@ import {
   extractChatGptAccountIdFromJwt,
   toOpenAICodexModelId,
 } from "./adapters/openai-codex.js";
+import { normalizeDeepSeekChatCompletionsRequest } from "./adapters/deepseek.js";
+import { ProviderHealthManager, type ProviderTier, tierFromModelId } from "./provider-health.js";
 import { resolveProviderForModelId, isAutoModelId, type ProviderId } from "./model-registry.js";
 import { route, DEFAULT_ROUTING_CONFIG } from "./router/index.js";
 import type { RoutingConfig } from "./router/types.js";
@@ -37,9 +42,101 @@ import type { ModelPricing } from "./router/selector.js";
 import { BLOCKRUN_MODELS } from "./models.js";
 import { VERSION } from "./version.js";
 import { getOpenAICodexAuthHeader } from "./openclaw-auth-profiles.js";
+import { FALLBACK_MODELS, canonicalModelForProviderTier } from "./fallback-config.js";
+import type { RetryConfig } from "./retry.js";
+import { fetchWithRetry } from "./retry.js";
+import { createCodexSseToChatCompletionsMapper } from "./codex-sse-mapper.js";
 
 const DEFAULT_PORT = 8402;
 const DEFAULT_REQUEST_TIMEOUT_MS = 180_000;
+
+// Debug: best-effort upstream request capture (prompt/messages) for short troubleshooting windows.
+// Disabled by default; enable with env:
+// - OAUTHROUTER_DEBUG_UPSTREAM_LOG=1
+// - OAUTHROUTER_DEBUG_UPSTREAM_LOG_SECONDS=300   (optional auto-disable window)
+// - OAUTHROUTER_DEBUG_UPSTREAM_LOG_MAX_CHARS=200000 (optional truncation)
+// - OAUTHROUTER_DEBUG_UPSTREAM_LOG_PATH=...      (optional file path)
+const UPSTREAM_DEBUG_START_MS = Date.now();
+const UPSTREAM_DEBUG_ENABLED =
+  process.env.OAUTHROUTER_DEBUG_UPSTREAM_LOG === "1" ||
+  process.env.OAUTHROUTER_DEBUG_UPSTREAM_LOG === "true";
+const UPSTREAM_DEBUG_SECONDS = Number(process.env.OAUTHROUTER_DEBUG_UPSTREAM_LOG_SECONDS || "0");
+const UPSTREAM_DEBUG_MAX_CHARS = Math.max(
+  1_000,
+  Number(process.env.OAUTHROUTER_DEBUG_UPSTREAM_LOG_MAX_CHARS || "200000"),
+);
+const UPSTREAM_DEBUG_LOG_PATH =
+  process.env.OAUTHROUTER_DEBUG_UPSTREAM_LOG_PATH ||
+  join(homedir(), ".openclaw", "oauthrouter", "logs", "upstream-requests.jsonl");
+let upstreamDebugDirReady = false;
+
+function shouldLogUpstreamNow(): boolean {
+  if (!UPSTREAM_DEBUG_ENABLED) return false;
+  if (!Number.isFinite(UPSTREAM_DEBUG_SECONDS) || UPSTREAM_DEBUG_SECONDS <= 0) return true;
+  return Date.now() - UPSTREAM_DEBUG_START_MS <= UPSTREAM_DEBUG_SECONDS * 1000;
+}
+
+function redactHeadersForLog(headers: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  const redact = new Set([
+    "authorization",
+    "proxy-authorization",
+    "x-api-key",
+    "x-openai-api-key",
+    "cookie",
+    "set-cookie",
+  ]);
+  for (const [k0, v] of Object.entries(headers)) {
+    const k = k0.toLowerCase();
+    out[k] = redact.has(k) ? "<redacted>" : v;
+  }
+  return out;
+}
+
+function truncateForLog(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const extra = text.length - maxChars;
+  return text.slice(0, maxChars) + `\n\n<truncated ${extra} chars>`;
+}
+
+async function logUpstreamRequestDebug(entry: {
+  requestId: string;
+  provider: string;
+  url: string;
+  path: string;
+  method: string;
+  headers: Record<string, string>;
+  body: Uint8Array;
+}): Promise<void> {
+  if (!shouldLogUpstreamNow()) return;
+  try {
+    if (!upstreamDebugDirReady) {
+      await mkdir(join(homedir(), ".openclaw", "oauthrouter", "logs"), { recursive: true });
+      upstreamDebugDirReady = true;
+    }
+    const bodyText = truncateForLog(
+      Buffer.from(entry.body).toString("utf8"),
+      UPSTREAM_DEBUG_MAX_CHARS,
+    );
+    const line = JSON.stringify({
+      ts: Date.now(),
+      requestId: entry.requestId,
+      provider: entry.provider,
+      method: entry.method,
+      path: entry.path,
+      url: entry.url,
+      headers: redactHeadersForLog(entry.headers),
+      body: bodyText,
+    });
+    await appendFile(UPSTREAM_DEBUG_LOG_PATH, line + "\n");
+  } catch {
+    // Never break request flow.
+  }
+}
+
+function canonicalModelForTier(provider: ProviderId, tier: ProviderTier): string | null {
+  return canonicalModelForProviderTier(provider, tier);
+}
 
 // Single-file debug dashboard (auth-gated by the proxy token).
 const ROUTING_TRACE_DASHBOARD_HTML = `<!doctype html>
@@ -59,12 +156,15 @@ const ROUTING_TRACE_DASHBOARD_HTML = `<!doctype html>
       main{padding:10px 12px 30px} table{width:100%;border-collapse:collapse;table-layout:fixed;font-size:12px}
       thead th{text-align:left;color:var(--muted);font-weight:600;padding:10px 8px;border-bottom:1px solid var(--border);font-family:var(--mono)}
       tbody td{padding:9px 8px;border-bottom:1px solid rgba(38,49,64,.65);vertical-align:top;font-family:var(--mono);word-wrap:break-word} tbody tr:hover{background:var(--rowHover)}
-      .col-ts{width:165px}.col-provider{width:130px}.col-model{width:280px}.col-upstream{width:auto}.col-status{width:90px}.col-lat{width:100px;text-align:right}
+	      .col-ts{width:165px}.col-provider{width:130px}.col-model{width:420px}.col-upstream{width:auto}.col-status{width:90px}.col-lat{width:100px;text-align:right}
       .pill{display:inline-block;padding:2px 8px;border-radius:999px;border:1px solid var(--border)}
       .good{color:#d4ffe6;background:rgba(31,138,76,.25);border-color:rgba(31,138,76,.55)}
       .warn{color:#fff3d6;background:rgba(199,144,45,.22);border-color:rgba(199,144,45,.55)}
       .bad{color:#ffd7d7;background:rgba(211,75,75,.18);border-color:rgba(211,75,75,.55)}
-      .muted{color:var(--muted)}.right{text-align:right}.mono{font-family:var(--mono)}.small{font-size:11px}
+	      .muted{color:var(--muted)}.right{text-align:right}.mono{font-family:var(--mono)}.small{font-size:11px}
+	      .kv{display:inline-block;min-width:64px;color:var(--muted)}
+	      .stack{display:flex;flex-direction:column;gap:3px}
+	      .tag{display:inline-block;padding:1px 6px;border-radius:7px;border:1px solid var(--border);font-size:11px;color:var(--muted);background:rgba(38,49,64,.22)}
     </style>
   </head>
   <body>
@@ -88,7 +188,7 @@ const ROUTING_TRACE_DASHBOARD_HTML = `<!doctype html>
             <th class="col-ts">time</th>
             <th class="col-session">session</th>
             <th class="col-provider">provider</th>
-            <th class="col-model">model</th>
+	            <th class="col-model">model (requested -&gt; routed)</th>
             <th class="col-upstream">upstream</th>
             <th class="col-status">status</th>
             <th class="col-lat right">latency</th>
@@ -111,20 +211,42 @@ const ROUTING_TRACE_DASHBOARD_HTML = `<!doctype html>
       function fmtTs(ts){ if(!Number.isFinite(ts)) return ''; const d=new Date(ts); const pad=(n,w=2)=>String(n).padStart(w,'0');
         return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+' '+pad(d.getHours())+':'+pad(d.getMinutes())+':'+pad(d.getSeconds())+'.'+pad(d.getMilliseconds(),3);
       }
-      function upstreamHostPath(u){ if(!u) return ''; try{ const x=new URL(u); return String(x.host)+String(x.pathname); }catch{ return String(u);} }
-      function esc(s){ return String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#39;'); }
-      function render(){ const q=(filterEl.value||'').trim().toLowerCase(); let html=''; let shown=0; for(const e of events){ const session=e?.sessionKey?String(e.sessionKey):''; const provider=e?.providerId?String(e.providerId):''; const requested=e?.modelIdRequested?String(e.modelIdRequested):''; const resolved=e?.modelIdResolved?String(e.modelIdResolved):''; const tier=e?.routingTier||''; const conf=e?.routingConfidence; const model=resolved?(requested==='auto'?resolved+' <span class="muted small">['+tier+(conf!=null?' '+Math.round(conf*100)+'%':'')+']</span>':resolved):requested; const upstream=upstreamHostPath(e?.upstreamUrl);
-        const hay=(session+' '+provider+' '+requested+' '+resolved+' '+tier+' '+upstream).toLowerCase(); if(q && !hay.includes(q)) continue; const statusText=(e?.status!=null)?String(e.status):'—'; const stCls=clsForStatus(e?.status); const latCls=clsForLatency(e?.latencyMs||0);
-        html += '<tr>'
-          + '<td class="col-ts muted">'+esc(fmtTs(e?.ts))+'</td>'
-          + '<td class="col-session mono small">'+esc(session)+'</td>'
-          + '<td class="col-provider">'+esc(provider)+'</td>'
-          + '<td class="col-model">'+model+'</td>'
-          + '<td class="col-upstream small">'+esc(upstream)+'</td>'
-          + '<td class="col-status"><span class="pill '+stCls+'">'+esc(statusText)+'</span></td>'
-          + '<td class="col-lat right"><span class="pill '+latCls+'">'+esc(String(Math.round(e?.latencyMs||0)))+'ms</span></td>'
-          + '</tr>';
-        shown++; if(shown>=MAX_RENDER) break; } rowsEl.innerHTML=html; countEl.textContent=String(events.length); }
+	      function upstreamHostPath(u){ if(!u) return ''; try{ const x=new URL(u); return String(x.host)+String(x.pathname); }catch{ return String(u);} }
+	      function esc(s){ return String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#39;'); }
+	      function routedModelForEvent(e){
+	        const mr=e?.modelIdRouted?String(e.modelIdRouted):'';
+	        if(mr) return mr;
+	        const pr=e?.preRoute?.routedModel?String(e.preRoute.routedModel):'';
+	        if(pr) return pr;
+	        const fb=e?.fallback?.fallbackModel?String(e.fallback.fallbackModel):'';
+	        if(fb) return fb;
+	        const res=e?.modelIdResolved?String(e.modelIdResolved):'';
+	        if(res) return res;
+	        const req=e?.modelIdRequested?String(e.modelIdRequested):'';
+	        return req;
+	      }
+	      function render(){ const q=(filterEl.value||'').trim().toLowerCase(); let html=''; let shown=0; for(const e of events){ const session=e?.sessionKey?String(e.sessionKey):''; const provider=e?.providerId?String(e.providerId):''; const requested=e?.modelIdRequested?String(e.modelIdRequested):''; const resolved=e?.modelIdResolved?String(e.modelIdResolved):''; const routed=routedModelForEvent(e); const tier=e?.routingTier||''; const conf=e?.routingConfidence; const upstream=upstreamHostPath(e?.upstreamUrl);
+	        const prOn=Boolean(e?.preRoute?.triggered); const fbOn=Boolean(e?.fallback?.triggered);
+	        let tags=''; if(prOn){ const rp=e?.preRoute?.reason?String(e.preRoute.reason):'pre_route'; tags += '<span class="tag">pre-route</span>'; if(rp) tags += ' <span class="tag">'+esc(rp)+'</span>'; }
+	        if(fbOn){ tags += (tags?' ':'') + '<span class="tag">fallback</span>'; const st=e?.fallback?.attempts?.length? e.fallback.attempts[e.fallback.attempts.length-1] : null; if(st && (st.fromStatus!=null || st.toStatus!=null)){ tags += ' <span class="tag">'+esc(String(st.fromStatus??'—'))+'→'+esc(String(st.toStatus??'—'))+'</span>'; } }
+	        if(requested==='auto' && resolved){ tags += (tags?' ':'') + '<span class="tag">auto '+esc(String(tier||''))+(conf!=null?(' '+esc(String(Math.round(conf*100)))+'%'):'')+'</span>'; }
+	        const modelCell =
+	          '<div class="stack">'
+	          + '<div><span class="kv">req</span>'+esc(requested||'')+'</div>'
+	          + '<div><span class="kv">routed</span>'+esc(routed||'')+'</div>'
+	          + (tags?('<div>'+tags+'</div>'):'')
+	          + '</div>';
+	        const hay=(session+' '+provider+' '+requested+' '+resolved+' '+routed+' '+tier+' '+upstream+' '+(prOn?'pre-route ':'')+(fbOn?'fallback ':'')).toLowerCase(); if(q && !hay.includes(q)) continue; const statusText=(e?.status!=null)?String(e.status):'—'; const stCls=clsForStatus(e?.status); const latCls=clsForLatency(e?.latencyMs||0);
+	        html += '<tr>'
+	          + '<td class="col-ts muted">'+esc(fmtTs(e?.ts))+'</td>'
+	          + '<td class="col-session mono small">'+esc(session)+'</td>'
+	          + '<td class="col-provider">'+esc(provider)+'</td>'
+	          + '<td class="col-model">'+modelCell+'</td>'
+	          + '<td class="col-upstream small">'+esc(upstream)+'</td>'
+	          + '<td class="col-status"><span class="pill '+stCls+'">'+esc(statusText)+'</span></td>'
+	          + '<td class="col-lat right"><span class="pill '+latCls+'">'+esc(String(Math.round(e?.latencyMs||0)))+'ms</span></td>'
+	          + '</tr>';
+	        shown++; if(shown>=MAX_RENDER) break; } rowsEl.innerHTML=html; countEl.textContent=String(events.length); }
       function addEvent(e){ events.unshift(e); if(events.length>MAX_STORE) events.length=MAX_STORE; if(!paused) render(); }
       pauseBtn.addEventListener('click',()=>{ paused=!paused; pauseBtn.textContent=paused?'resume':'pause'; if(!paused) render(); });
       clearBtn.addEventListener('click',()=>{ events.length=0; render(); });
@@ -146,19 +268,19 @@ const DEFAULT_AUTO_ROUTING_CONFIG: RoutingConfig = {
   tiers: {
     SIMPLE: {
       primary: "anthropic/claude-haiku-4-5",
-      fallback: ["openai-codex/gpt-5.2", "openai-codex/gpt-5.2-codex"],
+      fallback: [FALLBACK_MODELS["openai-codex"].SIMPLE, "openai-codex/gpt-5.2-codex"],
     },
     MEDIUM: {
       primary: "openai-codex/gpt-5.2-codex",
-      fallback: ["anthropic/claude-sonnet-4-5", "openai-codex/gpt-5.2"],
+      fallback: ["anthropic/claude-sonnet-4-5", FALLBACK_MODELS["openai-codex"].MEDIUM],
     },
     COMPLEX: {
       primary: "anthropic/claude-sonnet-4-5",
-      fallback: ["anthropic/claude-opus-4-5", "openai-codex/gpt-5.3-codex"],
+      fallback: ["anthropic/claude-opus-4-5", FALLBACK_MODELS["openai-codex"].COMPLEX],
     },
     REASONING: {
       primary: "anthropic/claude-opus-4-6",
-      fallback: ["anthropic/claude-opus-4-5", "openai-codex/gpt-5.3-codex"],
+      fallback: ["anthropic/claude-opus-4-5", FALLBACK_MODELS["openai-codex"].REASONING],
     },
   },
 };
@@ -267,6 +389,46 @@ export type UpstreamProviderConfig = {
   authHeader?: { name: string; value: string } | string;
 };
 
+export type RateLimitFallbackConfig = {
+  /**
+   * If true, when an upstream returns a rate-limit style response (default: [429]),
+   * retry the request against another provider/model and return that response to the client.
+   *
+   * This is the fix for: OpenClaw model fallbacks don't help when the proxy itself returns 429,
+   * because OpenClaw can't re-play the same request/stream in a provider-aware way.
+   */
+  enabled?: boolean;
+  /** HTTP status codes that should trigger fallback (default: [429]). */
+  onStatusCodes?: number[];
+  /** Only apply fallback when the initial attempt used one of these providers (default: ["anthropic"]). */
+  fromProviders?: ProviderId[];
+
+  /**
+   * Ordered fallback chain. The proxy tries each entry in order when the upstream
+   * returns a retryable rate-limit response (default: 429).
+   *
+   * Example: Anthropic 429 -> openai-codex -> deepseek.
+   */
+  chain?: Array<{
+    provider: ProviderId;
+    /**
+     * Optional map from requested model -> fallback model for this hop.
+     * Keys are normalized via `normalizeModelId()` (so "oauthrouter/anthropic/..." works).
+     */
+    modelMap?: Record<string, string>;
+    /**
+     * Default model if `modelMap` doesn't match (optional).
+     * Should be a router model id (e.g. "openai-codex/gpt-5.3-codex", "deepseek/deepseek-chat").
+     */
+    defaultModel?: string;
+  }>;
+
+  // Back-compat (single-hop).
+  toProvider?: ProviderId;
+  modelMap?: Record<string, string>;
+  defaultModel?: string;
+};
+
 export type ProxyOptions = {
   /** Optional override for OpenClaw per-agent auth-profiles.json path (used by openai-codex OAuth refresh). */
   authStorePath?: string;
@@ -283,6 +445,14 @@ export type ProxyOptions = {
 
   /** Port to listen on (default: 8402). */
   port?: number;
+  /**
+   * Host/interface to bind the local proxy to (default: "127.0.0.1").
+   *
+   * Recommended for remote viewing of `/debug/*`: keep this at "127.0.0.1" and
+   * use SSH local port forwarding (`ssh -L ...`) rather than exposing the port
+   * on your LAN.
+   */
+  listenHost?: string;
   /** Request timeout (ms). */
   requestTimeoutMs?: number;
 
@@ -305,12 +475,41 @@ export type ProxyOptions = {
   /** Optional routing config when using oauthrouter/auto. */
   routingConfig?: RoutingConfig;
 
+  /** Optional provider-aware 429 fallback (recommended). */
+  rateLimitFallback?: RateLimitFallbackConfig;
+
+  /**
+   * Optional provider health/cooldown tracking.
+   *
+   * If enabled, oauthrouter will persist a small health state file and may pre-route
+   * away from providers that are currently in cooldown (e.g. after 429s), avoiding
+   * the extra upstream roundtrip and preserving streaming context.
+   */
+  providerHealth?: {
+    enabled?: boolean;
+    persistPath?: string;
+    baseCooldownMs?: number;
+    maxCooldownMs?: number;
+    /** Optional background probes to detect recovery and measure baseline latency. */
+    probeIntervalMs?: number;
+    probeTimeoutMs?: number;
+  };
+
+  /**
+   * Optional upstream retry config for transient errors.
+   *
+   * Note: We intentionally do NOT retry on 429 by default; instead we rely on the
+   * provider-aware `rateLimitFallback` chain (Anthropic -> Codex -> DeepSeek).
+   */
+  retry?: Partial<RetryConfig>;
+
   onReady?: (port: number) => void;
   onError?: (error: Error) => void;
 };
 
 export type ProxyHandle = {
   port: number;
+  listenHost: string;
   baseUrl: string;
   authToken: string;
   close: () => Promise<void>;
@@ -432,6 +631,107 @@ function ensureCommaSeparatedIncludes(current: string | undefined, required: str
   return Array.from(have).join(",");
 }
 
+async function buildUpstreamHeadersForProvider(
+  req: IncomingMessage,
+  options: ProxyOptions,
+  provider: ProviderId,
+  upstreamConfig: UpstreamProviderConfig | undefined,
+): Promise<Record<string, string>> {
+  // Forward headers, stripping hop-by-hop + local auth.
+  const headers: Record<string, string> = {};
+  for (const [key, value] of Object.entries(req.headers)) {
+    const k = key.toLowerCase();
+    if (
+      k === "host" ||
+      k === "connection" ||
+      k === "transfer-encoding" ||
+      k === "content-length" ||
+      k === "authorization" ||
+      k === "proxy-authorization" ||
+      k === "x-api-key" ||
+      k === "x-openai-api-key"
+    ) {
+      continue;
+    }
+    if (typeof value === "string") headers[k] = value;
+  }
+
+  applyUpstreamHeaderOverrides(headers, options);
+  applyProviderHeaderOverrides(headers, upstreamConfig);
+
+  if (!headers["content-type"]) headers["content-type"] = "application/json";
+
+  if (provider === "openai-codex") {
+    // Required Codex/ChatGPT backend headers (pi-ai compatible)
+    if (!headers["openai-beta"]) headers["openai-beta"] = "responses=experimental";
+    if (!headers["originator"]) headers["originator"] = "pi";
+    // Force SSE accept for Codex backend.
+    headers["accept"] = "text/event-stream";
+    headers["user-agent"] = `pi(oauthrouter/${VERSION})`;
+
+    if (!headers["authorization"]) {
+      const auth = await getOpenAICodexAuthHeader({ authStorePath: options.authStorePath });
+      headers["authorization"] = auth.Authorization;
+    }
+
+    // Derive chatgpt-account-id from the JWT access token.
+    const bearer = headers["authorization"];
+    const m = typeof bearer === "string" ? bearer.match(/^\s*Bearer\s+(.+)\s*$/i) : null;
+    const jwt = m ? m[1] : typeof bearer === "string" ? bearer.trim() : "";
+    const accountId = jwt ? extractChatGptAccountIdFromJwt(jwt) : undefined;
+    if (accountId && !headers["chatgpt-account-id"]) headers["chatgpt-account-id"] = accountId;
+  }
+
+  const anthropicMode = provider === "anthropic";
+  if (anthropicMode && !headers["anthropic-version"]) {
+    headers["anthropic-version"] = "2023-06-01";
+  }
+  if (anthropicMode) {
+    normalizeAnthropicUpstreamAuthHeaders(headers);
+
+    if (!headers["x-api-key"] && !headers["authorization"]) {
+      throw new Error(
+        "Anthropic adapter requires auth via x-api-key (api key) or Authorization (OAuth: sk-ant-oat...) (set options.providers.anthropic.authHeader or options.upstreamAuthHeader)",
+      );
+    }
+  }
+
+  return headers;
+}
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function fetchUpstreamWithRetry(
+  options: ProxyOptions,
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  const retry = options.retry ?? DEFAULT_UPSTREAM_RETRY;
+  const fetchFn = (u: string, i?: RequestInit) => fetchWithTimeout(u, i ?? {}, timeoutMs);
+  return fetchWithRetry(fetchFn, url, init, retry);
+}
+
+const DEFAULT_UPSTREAM_RETRY: Partial<RetryConfig> = {
+  // Keep this small; this proxy is in the critical path.
+  maxRetries: 1,
+  baseDelayMs: 250,
+  // Prefer fast failover over waiting out rate limits.
+  retryableCodes: [502, 503, 504],
+};
+
 /**
  * ROUTER-012: Anthropic OAuth header mode.
  *
@@ -501,6 +801,78 @@ function estimateInputTokensFromBody(body: Buffer, parsed?: ParsedBody): number 
   return Math.ceil(body.length / 4);
 }
 
+function shouldTriggerRateLimitFallback(
+  cfg: RateLimitFallbackConfig | undefined,
+  provider: ProviderId | null,
+  status: number,
+): boolean {
+  if (!cfg || cfg.enabled === false) return false;
+  const codes = cfg.onStatusCodes && cfg.onStatusCodes.length > 0 ? cfg.onStatusCodes : [429];
+  if (!codes.includes(status)) return false;
+
+  const from =
+    cfg.fromProviders && cfg.fromProviders.length > 0
+      ? cfg.fromProviders
+      : (["anthropic"] as const);
+  return provider ? (from as readonly string[]).includes(provider) : false;
+}
+
+function getFallbackChain(cfg: RateLimitFallbackConfig | undefined): Array<{
+  provider: ProviderId;
+  modelMap?: Record<string, string>;
+  defaultModel?: string;
+}> {
+  if (!cfg) return [];
+
+  if (Array.isArray(cfg.chain) && cfg.chain.length > 0) {
+    return cfg.chain
+      .filter(
+        (
+          x,
+        ): x is {
+          provider: ProviderId;
+          modelMap?: Record<string, string>;
+          defaultModel?: string;
+        } => Boolean(x && typeof x === "object" && typeof (x as any).provider === "string"),
+      )
+      .map((x) => ({
+        provider: x.provider,
+        modelMap: x.modelMap,
+        defaultModel: x.defaultModel,
+      }));
+  }
+
+  // Back-compat single hop.
+  if (cfg.toProvider) {
+    return [
+      {
+        provider: cfg.toProvider,
+        modelMap: cfg.modelMap,
+        defaultModel: cfg.defaultModel,
+      },
+    ];
+  }
+
+  // Sensible default: Anthropic 429 -> Codex -> DeepSeek.
+  return [
+    { provider: "openai-codex", defaultModel: "openai-codex/gpt-5.3-codex" },
+    { provider: "deepseek", defaultModel: "deepseek/deepseek-chat" },
+  ];
+}
+
+function resolveFallbackModelId(
+  modelMap: Record<string, string> | undefined,
+  defaultModel: string | undefined,
+  requestedModelId: string | undefined,
+): string | null {
+  const requested = requestedModelId ? normalizeModelId(requestedModelId) : "";
+  if (requested && modelMap) {
+    const direct = modelMap[requested];
+    if (typeof direct === "string" && direct.trim()) return direct.trim();
+  }
+  return typeof defaultModel === "string" && defaultModel.trim() ? defaultModel.trim() : null;
+}
+
 /**
  * Start the local proxy.
  */
@@ -512,6 +884,180 @@ export async function startProxy(options: ProxyOptions): Promise<ProxyHandle> {
 
   const authToken = options.authToken ?? randomBytes(32).toString("base64url");
   const budgetTracker = new DailyBudgetTracker();
+  const health =
+    options.providerHealth?.enabled && options.providers
+      ? new ProviderHealthManager({
+          persistPath: options.providerHealth.persistPath,
+          baseCooldownMs: options.providerHealth.baseCooldownMs,
+          maxCooldownMs: options.providerHealth.maxCooldownMs,
+        })
+      : null;
+  const probeIntervalMs =
+    Number.isFinite(options.providerHealth?.probeIntervalMs) &&
+    (options.providerHealth?.probeIntervalMs ?? 0) > 0
+      ? (options.providerHealth?.probeIntervalMs as number)
+      : 30 * 60_000;
+  const probeTimeoutMs =
+    Number.isFinite(options.providerHealth?.probeTimeoutMs) &&
+    (options.providerHealth?.probeTimeoutMs ?? 0) > 0
+      ? (options.providerHealth?.probeTimeoutMs as number)
+      : 8_000;
+
+  let probeTimer: NodeJS.Timeout | null = null;
+
+  async function buildProbeHeadersForProvider(
+    provider: ProviderId,
+    upstreamConfig: UpstreamProviderConfig | undefined,
+  ): Promise<Record<string, string>> {
+    const headers: Record<string, string> = {};
+    applyUpstreamHeaderOverrides(headers, options);
+    applyProviderHeaderOverrides(headers, upstreamConfig);
+    if (!headers["content-type"]) headers["content-type"] = "application/json";
+
+    if (provider === "openai-codex") {
+      if (!headers["openai-beta"]) headers["openai-beta"] = "responses=experimental";
+      if (!headers["originator"]) headers["originator"] = "pi";
+      headers["accept"] = "text/event-stream";
+      headers["user-agent"] = `pi(oauthrouter/${VERSION})`;
+
+      if (!headers["authorization"]) {
+        const auth = await getOpenAICodexAuthHeader({ authStorePath: options.authStorePath });
+        headers["authorization"] = auth.Authorization;
+      }
+
+      const bearer = headers["authorization"];
+      const m = typeof bearer === "string" ? bearer.match(/^\s*Bearer\s+(.+)\s*$/i) : null;
+      const jwt = m ? m[1] : typeof bearer === "string" ? bearer.trim() : "";
+      const accountId = jwt ? extractChatGptAccountIdFromJwt(jwt) : undefined;
+      if (accountId && !headers["chatgpt-account-id"]) headers["chatgpt-account-id"] = accountId;
+    }
+
+    if (provider === "anthropic") {
+      if (!headers["anthropic-version"]) headers["anthropic-version"] = "2023-06-01";
+      normalizeAnthropicUpstreamAuthHeaders(headers);
+    }
+
+    return headers;
+  }
+
+  async function probeProvider(
+    provider: ProviderId,
+    tier: ProviderTier,
+    modelId: string,
+  ): Promise<void> {
+    if (!health || !options.providers) return;
+    if (tier === "UNKNOWN") return;
+
+    const cfg = options.providers[provider];
+    if (!cfg) return;
+
+    const urlBase = cfg.apiBase;
+    if (!urlBase) return;
+
+    let url = `${urlBase}/v1/chat/completions`;
+    let body: string;
+
+    if (provider === "anthropic") {
+      url = `${urlBase}/v1/messages`;
+      const oa = {
+        model: modelId,
+        messages: [{ role: "user", content: "ping" }],
+        max_tokens: 1,
+      } as OpenAIChatCompletionsRequest;
+      const anthropicReq = buildAnthropicMessagesRequestFromOpenAI(oa);
+
+      // Mirror the OAuth-token system-preamble requirement used in the main request path (ROUTER-016).
+      const providerAuthHeader = cfg.authHeader;
+      const providerAuthToken =
+        typeof providerAuthHeader === "string"
+          ? providerAuthHeader.replace(/^Bearer\s+/i, "")
+          : typeof providerAuthHeader === "object" && providerAuthHeader?.value
+            ? providerAuthHeader.value.replace(/^Bearer\s+/i, "")
+            : null;
+      if (providerAuthToken && providerAuthToken.startsWith("sk-ant-oat")) {
+        const CLAUDE_CODE_PREAMBLE = "You are Claude Code, Anthropic's official CLI for Claude.";
+        anthropicReq.system = CLAUDE_CODE_PREAMBLE;
+      }
+
+      body = JSON.stringify(anthropicReq);
+    } else if (provider === "openai-codex") {
+      url = `${urlBase}/backend-api/codex/responses`;
+      const oa = {
+        model: modelId,
+        messages: [{ role: "user", content: "ping" }],
+        max_tokens: 1,
+        stream: false,
+      } as OpenAIChatCompletionsRequest;
+      body = JSON.stringify(buildCodexResponsesRequestFromOpenAIChatCompletions(oa));
+    } else if (provider === "deepseek") {
+      const oa = {
+        model: modelId,
+        messages: [{ role: "user", content: "ping" }],
+        max_tokens: 1,
+      } as OpenAIChatCompletionsRequest;
+      body = JSON.stringify(normalizeDeepSeekChatCompletionsRequest(oa));
+    } else if (provider === "openai") {
+      const oa = {
+        model: modelId,
+        messages: [{ role: "user", content: "ping" }],
+        max_tokens: 1,
+      } as OpenAIChatCompletionsRequest;
+      body = JSON.stringify(normalizeOpenAiChatCompletionsRequest(oa));
+    } else {
+      // Unknown provider, skip.
+      return;
+    }
+
+    let headers: Record<string, string>;
+    try {
+      headers = await buildProbeHeadersForProvider(provider, cfg);
+    } catch (err) {
+      // If we can't even build headers (auth refresh failure etc), record a failure and return.
+      const msg = err instanceof Error ? err.stack || err.message : String(err);
+      console.error(`[provider-probe] headers provider=${provider} tier=${tier} error=${msg}`);
+      health.recordResult(provider, tier, 599);
+      return;
+    }
+    const started = Date.now();
+    try {
+      const rsp = await fetchWithTimeout(url, { method: "POST", headers, body }, probeTimeoutMs);
+      health.recordResult(provider, tier, rsp.status, Date.now() - started);
+      try {
+        await rsp.body?.cancel();
+      } catch {
+        // ignore
+      }
+    } catch {
+      // Treat timeouts/network errors as 599-ish.
+      health.recordResult(provider, tier, 599, Date.now() - started);
+    }
+  }
+
+  async function runBackgroundProbesOnce(): Promise<void> {
+    if (!health || !options.providers) return;
+    const fbCfg = options.rateLimitFallback;
+    if (!fbCfg?.enabled) return;
+
+    const tiers: ProviderTier[] = ["SIMPLE", "MEDIUM", "COMPLEX", "REASONING"];
+    for (const tier of tiers) {
+      for (const provider of Object.keys(options.providers) as ProviderId[]) {
+        try {
+          const model = canonicalModelForTier(provider, tier);
+          if (!model) continue;
+          await probeProvider(provider, tier, model);
+        } catch (err) {
+          // Never let probes crash the proxy. Treat as a failure signal for that provider/tier.
+          try {
+            health.recordResult(provider, tier, 599);
+          } catch {
+            // ignore
+          }
+          const msg = err instanceof Error ? err.stack || err.message : String(err);
+          console.error(`[provider-probe] provider=${provider} tier=${tier} error=${msg}`);
+        }
+      }
+    }
+  }
 
   const server = createServer(async (req, res) => {
     // --- Auth: required on ALL requests ---
@@ -562,6 +1108,14 @@ export async function startProxy(options: ProxyOptions): Promise<ProxyHandle> {
       const nRaw = u.searchParams.get("n");
       const n = nRaw ? Math.max(1, Math.min(5000, Number(nRaw))) : 200;
       sendJson(res, 200, { events: routingTrace.last(Number.isFinite(n) ? n : 200) });
+      return;
+    }
+
+    if (
+      health &&
+      (req.url === "/debug/provider-health" || req.url?.startsWith("/debug/provider-health?"))
+    ) {
+      sendJson(res, 200, { state: health.getSnapshot() });
       return;
     }
 
@@ -621,7 +1175,7 @@ export async function startProxy(options: ProxyOptions): Promise<ProxyHandle> {
     };
 
     try {
-      await proxyRequest(req, res, options, budgetTracker, trace);
+      await proxyRequest(req, res, options, budgetTracker, trace, health);
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
       options.onError?.(error);
@@ -646,20 +1200,48 @@ export async function startProxy(options: ProxyOptions): Promise<ProxyHandle> {
   });
 
   const listenPort = options.port ?? DEFAULT_PORT;
+  const listenHost =
+    typeof options.listenHost === "string" && options.listenHost.trim()
+      ? options.listenHost.trim()
+      : "127.0.0.1";
+  // 0.0.0.0 is not a connectable destination; return a sane local baseUrl for callers.
+  const baseHost = listenHost === "0.0.0.0" ? "127.0.0.1" : listenHost;
 
   return new Promise<ProxyHandle>((resolve, reject) => {
     server.on("error", reject);
 
-    server.listen(listenPort, "127.0.0.1", () => {
+    server.listen(listenPort, listenHost, () => {
       const addr = server.address() as AddressInfo;
       const port = addr.port;
+
+      if (health && options.providerHealth?.enabled) {
+        // Fire-and-forget initial probe; then keep probing in the background.
+        void runBackgroundProbesOnce().catch((err) => {
+          const msg = err instanceof Error ? err.stack || err.message : String(err);
+          console.error(`[provider-probe] initial error=${msg}`);
+        });
+        probeTimer = setInterval(() => {
+          void runBackgroundProbesOnce().catch((err) => {
+            const msg = err instanceof Error ? err.stack || err.message : String(err);
+            console.error(`[provider-probe] interval error=${msg}`);
+          });
+        }, probeIntervalMs);
+        // Don't keep the process alive just for probes.
+        probeTimer.unref?.();
+      }
+
       options.onReady?.(port);
       resolve({
         port,
-        baseUrl: `http://127.0.0.1:${port}`,
+        listenHost,
+        baseUrl: `http://${baseHost}:${port}`,
         authToken,
         close: () =>
           new Promise<void>((res, rej) => {
+            if (probeTimer) {
+              clearInterval(probeTimer);
+              probeTimer = null;
+            }
             server.close((e) => (e ? rej(e) : res()));
           }),
       });
@@ -667,12 +1249,25 @@ export async function startProxy(options: ProxyOptions): Promise<ProxyHandle> {
   });
 }
 
+// --- Test-only exports ---
+// These helpers are intentionally not part of the stable public API; they exist to make
+// the proxy's normalization and fallback logic unit-testable without binding sockets.
+export const __test__canonicalModelForTier = canonicalModelForTier;
+export const __test__parseBearerToken = parseBearerToken;
+export const __test__ensureCommaSeparatedIncludes = ensureCommaSeparatedIncludes;
+export const __test__normalizeAnthropicUpstreamAuthHeaders = normalizeAnthropicUpstreamAuthHeaders;
+export const __test__estimateInputTokensFromBody = estimateInputTokensFromBody;
+export const __test__shouldTriggerRateLimitFallback = shouldTriggerRateLimitFallback;
+export const __test__getRateLimitFallbackChain = getFallbackChain;
+export const __test__resolveFallbackModelId = resolveFallbackModelId;
+
 async function proxyRequest(
   req: IncomingMessage,
   res: ServerResponse,
   options: ProxyOptions,
   budgetTracker: DailyBudgetTracker,
   trace: TraceEvent,
+  health: ProviderHealthManager | null,
 ): Promise<void> {
   const originalPath = req.url ?? "";
 
@@ -681,7 +1276,7 @@ async function proxyRequest(
   for await (const chunk of req) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
-  const body = Buffer.concat(chunks);
+  let body = Buffer.concat(chunks);
 
   // Parse model/max_tokens when possible
   let parsed: ParsedBody | undefined;
@@ -708,6 +1303,7 @@ async function proxyRequest(
   const isResponses = originalPath === "/v1/responses" || originalPath.startsWith("/v1/responses?");
 
   trace.stream = Boolean((parsed as any)?.stream);
+  trace.toolCount = (parsed as any)?.tools?.length ?? 0;
 
   // --- oauthrouter/auto ---
   if ((isChatCompletions || isResponses) && modelId && isAutoModelId(modelId)) {
@@ -765,7 +1361,7 @@ async function proxyRequest(
 
   // Determine upstream provider/base
   const providerFromModel = modelId ? resolveProviderForModelId(modelId) : null;
-  const provider: ProviderId | null = options.providers
+  let provider: ProviderId | null = options.providers
     ? providerFromModel
     : options.apiBase
       ? isAnthropicApiBase(options.apiBase)
@@ -773,11 +1369,98 @@ async function proxyRequest(
         : "openai"
       : providerFromModel;
 
+  const tier = tierFromModelId(modelId);
+  trace.tier = tier;
+
+  // Pre-route away from providers in cooldown (e.g. after 429s) BEFORE hitting upstream.
+  // This avoids paying an extra 429 roundtrip and preserves streaming context.
+  if (
+    health &&
+    provider &&
+    tier !== "UNKNOWN" &&
+    health.isInCooldown(provider, tier) &&
+    options.rateLimitFallback?.enabled
+  ) {
+    // Candidates are: primary provider first, then the configured fallback chain providers.
+    const chain = getFallbackChain(options.rateLimitFallback);
+    const candidates: ProviderId[] = [provider];
+    for (const h of chain) {
+      const p = h.provider;
+      if (!p || p === provider) continue;
+      if (!candidates.includes(p)) candidates.push(p);
+    }
+
+    const picked = health.pickHealthyProvider(tier, candidates);
+    if (picked && picked !== provider) {
+      // Rewrite the requested model to the picked provider's mapped model when possible.
+      // If we don't have a direct mapping for this model id, fall back to a canonical per-tier model.
+      const hop = chain.find((h) => h.provider === picked);
+      const routedModel =
+        hop?.provider && (hop.modelMap || hop.defaultModel)
+          ? resolveFallbackModelId(hop.modelMap, hop.defaultModel, modelId)
+          : null;
+      const routedModelFinal = routedModel ?? canonicalModelForTier(picked, tier);
+
+      if (routedModelFinal) {
+        trace.preRoute = {
+          triggered: true,
+          fromProvider: provider,
+          toProvider: picked,
+          requestedModel: modelId,
+          routedModel: routedModelFinal,
+          reason: "provider_in_cooldown",
+        };
+        modelId = routedModelFinal;
+        if (parsed) parsed.model = routedModelFinal;
+        provider = picked;
+      }
+    }
+  }
+
+  // --- Tool-use preamble (universal, all providers) ---
+  // Non-Claude models (GPT-5.x Codex, DeepSeek, etc.) tend to describe tool calls
+  // and ask for confirmation rather than invoking them directly.  Injecting an
+  // explicit instruction into the system message fixes this across all providers.
+  if (
+    isChatCompletions &&
+    parsed &&
+    Array.isArray((parsed as any).tools) &&
+    (parsed as any).tools.length > 0
+  ) {
+    const toolPreamble =
+      "IMPORTANT: You have tools available. When a user's request can be fulfilled by calling a tool, you MUST call the tool directly. Do NOT describe what you would do, ask for confirmation, or explain that you will use a tool. Just call it.";
+
+    const msgs = parsed.messages;
+    if (Array.isArray(msgs)) {
+      const lastSystemIdx = msgs.reduce<number>((acc, m, i) => (m.role === "system" ? i : acc), -1);
+      if (lastSystemIdx >= 0) {
+        const sys = msgs[lastSystemIdx];
+        const existing = typeof sys.content === "string" ? sys.content : "";
+        sys.content = existing + "\n\n" + toolPreamble;
+      } else {
+        msgs.unshift({ role: "system", content: toolPreamble });
+      }
+    }
+
+    if ((parsed as any).tool_choice === undefined) {
+      (parsed as any).tool_choice = "auto";
+    }
+
+    body = Buffer.from(JSON.stringify(parsed));
+
+    console.error(
+      `[tool-preamble] injected for ${provider}/${modelId} tools=${(parsed as any).tools.length}`,
+    );
+  }
+
   const upstreamConfig = provider && options.providers ? options.providers[provider] : undefined;
   const upstreamApiBase = upstreamConfig?.apiBase ?? options.apiBase;
   if (!upstreamApiBase) {
     throw new Error("No upstream apiBase configured");
   }
+
+  // Capture the model we are about to route upstream. This is updated again if we fall back later.
+  trace.modelIdRouted = modelId;
 
   // Upstream defaults (passthrough)
   let upstreamPath = originalPath;
@@ -1089,6 +1772,13 @@ async function proxyRequest(
     upstreamBody = Buffer.from(JSON.stringify(normalized));
   }
 
+  if (provider === "deepseek" && isChatCompletions && body.length > 0) {
+    const openAiReq = JSON.parse(body.toString()) as OpenAIChatCompletionsRequest;
+    if (typeof modelId === "string" && modelId.trim()) openAiReq.model = modelId;
+    const normalized = normalizeDeepSeekChatCompletionsRequest(openAiReq);
+    upstreamBody = Buffer.from(JSON.stringify(normalized));
+  }
+
   // openai-codex (chatgpt.com) adapter: OpenAI /v1/responses passthrough -> Codex responses
   if (provider === "openai-codex" && isResponses) {
     if (body.length === 0) throw new Error("Empty request body");
@@ -1100,7 +1790,7 @@ async function proxyRequest(
       // If OpenClaw calls /v1/responses with model=auto, resolve it to a concrete model.
       // We currently only support Codex + Anthropic upstreams; for Responses we route to Codex.
       const m = modelId.trim();
-      const resolved = isAutoModelId(m) ? "openai-codex/gpt-5.2" : m;
+      const resolved = isAutoModelId(m) ? FALLBACK_MODELS["openai-codex"].SIMPLE : m;
       rspReq.model = toOpenAICodexModelId(resolved);
     }
 
@@ -1183,7 +1873,11 @@ async function proxyRequest(
 
         const created = Math.floor(Date.now() / 1000);
         const idFallback = `chatcmpl_${randomBytes(12).toString("hex")}`;
-        let id = idFallback;
+        const mapper = createCodexSseToChatCompletionsMapper({
+          created,
+          idFallback,
+          requestedModel,
+        });
 
         for await (const frame of readSseDataFrames(upstream.body)) {
           if (frame.data === "[DONE]") break;
@@ -1191,26 +1885,16 @@ async function proxyRequest(
           const payload = tryParseJson<any>(frame.data);
           if (!payload) continue;
 
-          const rsp = payload.response;
-          if (rsp && typeof rsp === "object" && typeof rsp.id === "string" && rsp.id.trim()) {
-            id = rsp.id.trim();
+          for (const outChunk of mapper.handlePayload(payload)) {
+            nodeRes.write(`data: ${JSON.stringify(outChunk)}\n\n`);
           }
 
-          const type = typeof payload.type === "string" ? payload.type : "";
-          if (type === "response.output_text.delta" && typeof payload.delta === "string") {
-            const chunk = {
-              id,
-              object: "chat.completion.chunk",
-              created,
-              model: requestedModel,
-              choices: [{ index: 0, delta: { content: payload.delta } }],
-            };
-            nodeRes.write(`data: ${JSON.stringify(chunk)}\n\n`);
-          }
-
-          // Ignore tool/reasoning/metadata events.
+          // Ignore reasoning/metadata events.
         }
 
+        // Emit a terminal finish_reason so tool loops can trigger correctly.
+        const { finalChunk } = mapper.finalize();
+        nodeRes.write(`data: ${JSON.stringify(finalChunk)}\n\n`);
         nodeRes.write("data: [DONE]\n\n");
         nodeRes.end();
       };
@@ -1229,6 +1913,13 @@ async function proxyRequest(
 
         let content = "";
         let upstreamId: string | undefined;
+        const toolCalls: Array<{
+          id: string;
+          type: "function";
+          function: { name: string; arguments: string };
+        }> = [];
+        const toolCallIdx = new Map<string, number>();
+        let activeToolCallId: string | null = null;
 
         const looksLikeSse =
           upstreamCt.includes("text/event-stream") ||
@@ -1254,6 +1945,83 @@ async function proxyRequest(
             const type = typeof payload.type === "string" ? payload.type : "";
             if (type === "response.output_text.delta" && typeof payload.delta === "string") {
               content += payload.delta;
+            }
+            if (type === "response.output_item.added") {
+              const item = payload.item;
+              if (item && typeof item === "object" && item.type === "function_call") {
+                const callId = typeof item.call_id === "string" ? item.call_id : "";
+                const name = typeof item.name === "string" ? item.name : "";
+                if (callId && name) {
+                  activeToolCallId = callId;
+                  if (!toolCallIdx.has(callId)) {
+                    toolCallIdx.set(callId, toolCalls.length);
+                    const rawArgs = (item as any).arguments;
+                    toolCalls.push({
+                      id: callId,
+                      type: "function",
+                      function: {
+                        name,
+                        arguments:
+                          typeof rawArgs === "string"
+                            ? rawArgs
+                            : rawArgs && typeof rawArgs === "object"
+                              ? JSON.stringify(rawArgs)
+                              : "",
+                      },
+                    });
+                  }
+                }
+              }
+            }
+            if (
+              type === "response.function_call_arguments.delta" &&
+              payload &&
+              typeof payload === "object"
+            ) {
+              const callId =
+                typeof payload.call_id === "string"
+                  ? payload.call_id
+                  : activeToolCallId
+                    ? activeToolCallId
+                    : "";
+              const d = (payload as any).delta;
+              const delta =
+                typeof d === "string"
+                  ? d
+                  : d && typeof d === "object" && typeof (d as any).partial_json === "string"
+                    ? String((d as any).partial_json)
+                    : d && typeof d === "object" && typeof (d as any).delta === "string"
+                      ? String((d as any).delta)
+                      : d && typeof d === "object" && typeof (d as any).arguments === "string"
+                        ? String((d as any).arguments)
+                        : "";
+              if (callId && delta && toolCallIdx.has(callId)) {
+                const idx = toolCallIdx.get(callId) ?? 0;
+                toolCalls[idx]!.function.arguments += delta;
+              }
+            }
+            if (
+              type === "response.function_call_arguments.done" &&
+              payload &&
+              typeof payload === "object"
+            ) {
+              const callId =
+                typeof payload.call_id === "string"
+                  ? payload.call_id
+                  : activeToolCallId
+                    ? activeToolCallId
+                    : "";
+              const rawArgs = (payload as any).arguments;
+              const args =
+                typeof rawArgs === "string"
+                  ? rawArgs
+                  : rawArgs && typeof rawArgs === "object"
+                    ? JSON.stringify(rawArgs)
+                    : "";
+              if (callId && args && toolCallIdx.has(callId)) {
+                const idx = toolCallIdx.get(callId) ?? 0;
+                toolCalls[idx]!.function.arguments = args;
+              }
             }
 
             const extracted = extractOutputTextFromCodexResponsesPayload(payload);
@@ -1283,6 +2051,24 @@ async function proxyRequest(
             (typeof json.output_text === "string" && json.output_text) ||
             extractOutputTextFromCodexResponsesPayload({ response: json }) ||
             "";
+
+          const outItems = (json as any)?.output;
+          if (Array.isArray(outItems)) {
+            for (const it of outItems) {
+              if (it && typeof it === "object" && it.type === "function_call") {
+                const callId = typeof it.call_id === "string" ? it.call_id : "";
+                const name = typeof it.name === "string" ? it.name : "";
+                const args = typeof it.arguments === "string" ? it.arguments : "";
+                if (callId && name) {
+                  toolCalls.push({
+                    id: callId,
+                    type: "function",
+                    function: { name, arguments: args },
+                  });
+                }
+              }
+            }
+          }
         }
 
         const created = Math.floor(Date.now() / 1000);
@@ -1296,8 +2082,12 @@ async function proxyRequest(
           choices: [
             {
               index: 0,
-              message: { role: "assistant", content },
-              finish_reason: "stop",
+              message: {
+                role: "assistant",
+                content: toolCalls.length > 0 ? content || null : content,
+                ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+              },
+              finish_reason: toolCalls.length > 0 ? "tool_calls" : "stop",
             },
           ],
         };
@@ -1383,90 +2173,349 @@ async function proxyRequest(
     reserved = true;
   }
 
-  // Forward headers, stripping hop-by-hop + local auth
-  const headers: Record<string, string> = {};
-  for (const [key, value] of Object.entries(req.headers)) {
-    const k = key.toLowerCase();
-    if (
-      k === "host" ||
-      k === "connection" ||
-      k === "transfer-encoding" ||
-      k === "content-length" ||
-      k === "authorization" ||
-      k === "proxy-authorization" ||
-      k === "x-api-key" ||
-      k === "x-openai-api-key"
-    ) {
-      continue;
-    }
-    if (typeof value === "string") headers[k] = value;
-  }
-
-  applyUpstreamHeaderOverrides(headers, options);
-  applyProviderHeaderOverrides(headers, upstreamConfig);
-
-  if (!headers["content-type"]) headers["content-type"] = "application/json";
-
-  if (provider === "openai-codex") {
-    // Required Codex/ChatGPT backend headers (pi-ai compatible)
-    if (!headers["openai-beta"]) headers["openai-beta"] = "responses=experimental";
-    if (!headers["originator"]) headers["originator"] = "pi";
-    // Force SSE accept for Codex backend.
-    headers["accept"] = "text/event-stream";
-    headers["user-agent"] = `pi(oauthrouter/${VERSION})`;
-
-    if (!headers["authorization"]) {
-      const auth = await getOpenAICodexAuthHeader({ authStorePath: options.authStorePath });
-      headers["authorization"] = auth.Authorization;
-    }
-
-    // Derive chatgpt-account-id from the JWT access token.
-    const bearer = headers["authorization"];
-    const m = typeof bearer === "string" ? bearer.match(/^\s*Bearer\s+(.+)\s*$/i) : null;
-    const jwt = m ? m[1] : typeof bearer === "string" ? bearer.trim() : "";
-    const accountId = jwt ? extractChatGptAccountIdFromJwt(jwt) : undefined;
-    if (accountId && !headers["chatgpt-account-id"]) headers["chatgpt-account-id"] = accountId;
-  }
-
-  const anthropicMode = provider === "anthropic";
-
-  if (anthropicMode && !headers["anthropic-version"]) {
-    headers["anthropic-version"] = "2023-06-01";
-  }
-
-  if (anthropicMode) {
-    normalizeAnthropicUpstreamAuthHeaders(headers);
-
-    if (!headers["x-api-key"] && !headers["authorization"]) {
-      throw new Error(
-        "Anthropic adapter requires auth via x-api-key (api key) or Authorization (OAuth: sk-ant-oat...) (set options.providers.anthropic.authHeader or options.upstreamAuthHeader)",
-      );
-    }
-  }
-
   const timeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const upstream = await fetch(upstreamUrl, {
+    if (!provider) throw new Error("Could not resolve provider for requested model");
+
+    const primaryHeaders = await buildUpstreamHeadersForProvider(
+      req,
+      options,
+      provider,
+      upstreamConfig,
+    );
+    let activeProvider: ProviderId = provider;
+    let activeUpstreamUrl = upstreamUrl;
+    let activeUpstreamPath = upstreamPath;
+    let activeUpstreamBody = upstreamBody;
+    let activeStreamMapper = responseStreamMapper;
+    let activeMapper = responseMapper;
+    let passthrough = !activeStreamMapper && !activeMapper;
+
+    // Debug: capture the exact upstream request body (after adapter transforms).
+    void logUpstreamRequestDebug({
+      requestId: trace.requestId,
+      provider: activeProvider,
+      url: activeUpstreamUrl,
+      path: activeUpstreamPath,
       method: req.method ?? "POST",
-      headers,
-      body: upstreamBody.length > 0 ? upstreamBody : undefined,
-      signal: controller.signal,
+      headers: primaryHeaders,
+      body: activeUpstreamBody,
     });
 
-    clearTimeout(timeoutId);
+    let upstream = await fetchUpstreamWithRetry(
+      options,
+      activeUpstreamUrl,
+      {
+        method: req.method ?? "POST",
+        headers: primaryHeaders,
+        body: activeUpstreamBody.length > 0 ? activeUpstreamBody : undefined,
+      },
+      timeoutMs,
+    );
 
-    if (responseStreamMapper) {
+    // Update provider health based on the initial attempt.
+    if (health && tier !== "UNKNOWN") {
+      const initialLatency = Date.now() - trace.ts;
+      health.recordResult(activeProvider, tier, upstream.status, initialLatency);
+    }
+
+    // Provider-aware 429 fallback (fix for OpenClaw fallbacks not being able to replay the request).
+    // Chain: Anthropic -> Codex -> DeepSeek (default), configurable via options.rateLimitFallback.chain.
+    const fbCfg = options.rateLimitFallback;
+    if (
+      isChatCompletions &&
+      shouldTriggerRateLimitFallback(fbCfg, activeProvider, upstream.status)
+    ) {
+      const chain = getFallbackChain(fbCfg);
+      const attempts: NonNullable<TraceEvent["fallback"]>["attempts"] = [];
+
+      // Parse the original OpenAI-shaped request once so we can replay it.
+      let originalOpenAiReq: OpenAIChatCompletionsRequest | null = null;
+      try {
+        originalOpenAiReq = JSON.parse(body.toString()) as OpenAIChatCompletionsRequest;
+      } catch {
+        originalOpenAiReq = null;
+      }
+
+      for (const hop of chain) {
+        if (!originalOpenAiReq) break;
+
+        const toProvider = hop.provider;
+        // Avoid loops when the fallback chain includes the active provider.
+        if (toProvider === activeProvider) continue;
+        const toConfig = options.providers?.[toProvider];
+        if (!toConfig) continue;
+
+        const fallbackModel = resolveFallbackModelId(hop.modelMap, hop.defaultModel, modelId);
+        if (!fallbackModel) continue;
+
+        // Best-effort: close the previous response body before the next attempt.
+        try {
+          await upstream.body?.cancel();
+        } catch {}
+
+        // Clone + rewrite model.
+        const openAiReq: OpenAIChatCompletionsRequest = {
+          ...originalOpenAiReq,
+          model: fallbackModel,
+        };
+
+        let fbPath = originalPath; // preserve any query string
+        let fbBody: Uint8Array;
+        let fbStreamMapper:
+          | ((upstream: Response, res: ServerResponse) => Promise<void>)
+          | undefined;
+        let fbMapper:
+          | ((
+              upstream: Response,
+            ) => Promise<{ status: number; headers: Record<string, string>; body: Buffer }>)
+          | undefined;
+
+        if (toProvider === "openai-codex") {
+          // Re-use the existing Codex adapter path (chat.completions -> /backend-api/codex/responses).
+          const clientStream = Boolean((openAiReq as any).stream);
+          const requestedModel = typeof openAiReq.model === "string" ? openAiReq.model : undefined;
+          const codexReq = buildCodexResponsesRequestFromOpenAIChatCompletions(openAiReq);
+
+          fbPath = "/backend-api/codex/responses";
+          fbBody = Buffer.from(JSON.stringify(codexReq));
+
+          if (clientStream) {
+            fbStreamMapper = async (upstreamRsp, nodeRes) => {
+              const upstreamCt = upstreamRsp.headers.get("content-type") ?? "";
+
+              if (!upstreamRsp.ok) {
+                const raw = await upstreamRsp.text();
+                nodeRes.writeHead(upstreamRsp.status, {
+                  "content-type": upstreamCt || "application/json",
+                });
+                nodeRes.end(raw);
+                return;
+              }
+
+              nodeRes.writeHead(200, {
+                "content-type": "text/event-stream; charset=utf-8",
+                "cache-control": "no-cache, no-transform",
+              });
+
+              if (!upstreamRsp.body) {
+                nodeRes.write("data: [DONE]\n\n");
+                nodeRes.end();
+                return;
+              }
+
+              const created = Math.floor(Date.now() / 1000);
+              const idFallback = `chatcmpl_${randomBytes(12).toString("hex")}`;
+              let id = idFallback;
+
+              for await (const frame of readSseDataFrames(upstreamRsp.body)) {
+                if (frame.data === "[DONE]") break;
+
+                const payload = tryParseJson<any>(frame.data);
+                if (!payload) continue;
+
+                const rsp = payload.response;
+                if (rsp && typeof rsp === "object" && typeof rsp.id === "string" && rsp.id.trim()) {
+                  id = rsp.id.trim();
+                }
+
+                const type = typeof payload.type === "string" ? payload.type : "";
+                if (type === "response.output_text.delta" && typeof payload.delta === "string") {
+                  const chunk = {
+                    id,
+                    object: "chat.completion.chunk",
+                    created,
+                    model: requestedModel,
+                    choices: [{ index: 0, delta: { content: payload.delta } }],
+                  };
+                  nodeRes.write(`data: ${JSON.stringify(chunk)}\n\n`);
+                }
+              }
+
+              nodeRes.write("data: [DONE]\n\n");
+              nodeRes.end();
+            };
+          } else {
+            fbMapper = async (upstreamRsp) => {
+              const upstreamCt = upstreamRsp.headers.get("content-type") ?? "application/json";
+              const raw = await upstreamRsp.text();
+
+              if (!upstreamRsp.ok) {
+                return {
+                  status: upstreamRsp.status,
+                  headers: { "content-type": upstreamCt },
+                  body: Buffer.from(raw),
+                };
+              }
+
+              let content = "";
+              let upstreamId: string | undefined;
+
+              const looksLikeSse =
+                upstreamCt.includes("text/event-stream") ||
+                raw.startsWith("data:") ||
+                raw.includes("\n\ndata:") ||
+                raw.includes("\nevent:");
+
+              if (looksLikeSse) {
+                let completedText: string | undefined;
+
+                const re = /^data:\s?(.*)$/gm;
+                let match: RegExpExecArray | null;
+                while ((match = re.exec(raw))) {
+                  const data = (match[1] ?? "").trim();
+                  if (!data || data === "[DONE]") continue;
+
+                  const payload = tryParseJson<any>(data);
+                  if (!payload) continue;
+
+                  const rsp = payload.response;
+                  if (rsp && typeof rsp === "object" && typeof rsp.id === "string")
+                    upstreamId = rsp.id;
+
+                  const type = typeof payload.type === "string" ? payload.type : "";
+                  if (type === "response.output_text.delta" && typeof payload.delta === "string") {
+                    content += payload.delta;
+                  }
+
+                  const extracted = extractOutputTextFromCodexResponsesPayload(payload);
+                  if (typeof extracted === "string") completedText = extracted;
+                }
+
+                if (typeof completedText === "string") content = completedText;
+              } else {
+                const json = tryParseJson<any>(raw);
+                if (!json) {
+                  return {
+                    status: 502,
+                    headers: { "content-type": "application/json" },
+                    body: Buffer.from(
+                      JSON.stringify({
+                        error: {
+                          message: "openai-codex upstream returned non-JSON",
+                          type: "upstream_error",
+                        },
+                      }),
+                    ),
+                  };
+                }
+
+                upstreamId = typeof json.id === "string" ? json.id : upstreamId;
+                content =
+                  (typeof json.output_text === "string" && json.output_text) ||
+                  extractOutputTextFromCodexResponsesPayload({ response: json }) ||
+                  "";
+              }
+
+              const created = Math.floor(Date.now() / 1000);
+              const id = upstreamId || `chatcmpl_${randomBytes(12).toString("hex")}`;
+
+              const mapped = {
+                id,
+                object: "chat.completion",
+                created,
+                model: requestedModel,
+                choices: [
+                  {
+                    index: 0,
+                    message: { role: "assistant", content },
+                    finish_reason: "stop",
+                  },
+                ],
+              };
+
+              return {
+                status: 200,
+                headers: { "content-type": "application/json" },
+                body: Buffer.from(JSON.stringify(mapped)),
+              };
+            };
+          }
+        } else {
+          // OpenAI-compatible providers: /v1/chat/completions passthrough with model normalization.
+          const normalized =
+            toProvider === "deepseek"
+              ? normalizeDeepSeekChatCompletionsRequest(openAiReq)
+              : toProvider === "openai"
+                ? normalizeOpenAiChatCompletionsRequest(openAiReq)
+                : openAiReq;
+          fbBody = Buffer.from(JSON.stringify(normalized));
+        }
+
+        const fbUrl = `${toConfig.apiBase}${fbPath}`;
+        const fbHeaders = await buildUpstreamHeadersForProvider(req, options, toProvider, toConfig);
+
+        const fbStarted = Date.now();
+        // Debug: capture the fallback hop request body as well.
+        void logUpstreamRequestDebug({
+          requestId: trace.requestId,
+          provider: toProvider,
+          url: fbUrl,
+          path: fbPath,
+          method: req.method ?? "POST",
+          headers: fbHeaders,
+          body: Buffer.from(fbBody),
+        });
+        const fbUpstream = await fetchUpstreamWithRetry(
+          options,
+          fbUrl,
+          { method: req.method ?? "POST", headers: fbHeaders, body: fbBody as unknown as BodyInit },
+          timeoutMs,
+        );
+        const fbLatency = Date.now() - fbStarted;
+
+        attempts.push({
+          fromProvider: activeProvider,
+          toProvider,
+          fromStatus: upstream.status,
+          toStatus: fbUpstream.status,
+          requestedModel: modelId,
+          fallbackModel,
+        });
+
+        if (health && tier !== "UNKNOWN") {
+          // Record the rate-limit failure on the previous provider and the result of this hop.
+          health.recordResult(activeProvider, tier, upstream.status);
+          health.recordResult(toProvider, tier, fbUpstream.status, fbLatency);
+        }
+
+        // If this hop isn't rate-limited, accept it and stop.
+        upstream = fbUpstream;
+        activeProvider = toProvider;
+        activeUpstreamUrl = fbUrl;
+        activeUpstreamPath = fbPath;
+        activeUpstreamBody = Buffer.from(fbBody);
+        activeStreamMapper = fbStreamMapper;
+        activeMapper = fbMapper;
+        passthrough = !activeStreamMapper && !activeMapper;
+
+        trace.providerId = activeProvider;
+        trace.upstreamUrl = activeUpstreamUrl;
+        trace.modelIdRouted = fallbackModel;
+        trace.fallback = {
+          triggered: true,
+          attempts,
+          requestedModel: modelId,
+          fallbackModel,
+        };
+
+        const codes =
+          fbCfg?.onStatusCodes && fbCfg.onStatusCodes.length > 0 ? fbCfg.onStatusCodes : [429];
+        if (!codes.includes(fbUpstream.status)) break;
+      }
+    }
+
+    // --- Write response (mapped or passthrough) ---
+    if (activeStreamMapper) {
       trace.status = upstream.ok ? 200 : upstream.status;
-      await responseStreamMapper(upstream, res);
-    } else if (responseMapper) {
-      const mapped = await responseMapper(upstream);
+      await activeStreamMapper(upstream, res);
+    } else if (activeMapper) {
+      const mapped = await activeMapper(upstream);
       trace.status = mapped.status;
       res.writeHead(mapped.status, mapped.headers);
       res.end(mapped.body);
-    } else {
+    } else if (passthrough) {
       const responseHeaders: Record<string, string> = {};
       upstream.headers.forEach((value, key) => {
         if (key === "transfer-encoding" || key === "connection") return;
@@ -1492,12 +2541,10 @@ async function proxyRequest(
       res.end();
     }
 
-    if (reserved) {
+    if (reserved && trace.status !== undefined && trace.status >= 200 && trace.status < 300) {
       await budgetTracker.commit(estimatedInputTokens, estimatedOutputTokens);
     }
   } catch (err) {
-    clearTimeout(timeoutId);
-
     if (reserved) {
       await budgetTracker.rollback(estimatedInputTokens, estimatedOutputTokens);
     }
@@ -1509,3 +2556,5 @@ async function proxyRequest(
     throw err;
   }
 }
+
+export const __test__proxyRequest = proxyRequest;

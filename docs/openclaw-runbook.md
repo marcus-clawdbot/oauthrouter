@@ -38,6 +38,7 @@ export OAUTHROUTER_LOCAL_TOKEN="change-me-long-random"
 # Upstream creds (examples)
 export OPENAI_API_KEY="sk-..."                  # optional unless you want openai/*
 export ANTHROPIC_API_KEY="sk-ant-..."           # can be OAuth (sk-ant-oat...) or API key
+export DEEPSEEK_API_KEY="sk-..."                # optional unless you want deepseek/* or rate-limit fallback
 ```
 
 ### Start command (keeps running)
@@ -76,6 +77,27 @@ const proxy = await startProxy({
     "openai-codex": {
       apiBase: "https://chatgpt.com",
     },
+
+    // DeepSeek (OpenAI-compatible). Requires an API key.
+    // deepseek/* model ids are normalized to upstream ids (e.g. deepseek/deepseek-chat -> deepseek-chat).
+    deepseek: {
+      apiBase: "https://api.deepseek.com",
+      authHeader: process.env.DEEPSEEK_API_KEY ? `Bearer ${process.env.DEEPSEEK_API_KEY}` : undefined,
+    },
+  },
+
+  // Provider-aware fallback: if Anthropic returns HTTP 429, re-issue the same request to DeepSeek.
+  // This avoids relying on OpenClaw model fallbacks (which can't replay the same request/stream).
+  rateLimitFallback: {
+    enabled: true,
+    fromProviders: ["anthropic"],
+    onStatusCodes: [429],
+    chain: [
+      // First fallback: Codex (lots of capacity)
+      { provider: "openai-codex", defaultModel: "openai-codex/gpt-5.3-codex" },
+      // Third fallback: DeepSeek (API key)
+      { provider: "deepseek", defaultModel: "deepseek/deepseek-chat" },
+    ],
   },
 });
 
@@ -88,6 +110,37 @@ await new Promise(() => {});
 Health endpoint (still requires local token):
 
 - `GET /health`
+
+## View /debug/dashboard from another machine (SSH port forward)
+
+If you SSH into the Mac mini from your laptop, the safest way to view the debug dashboard is SSH local port forwarding (keep OAuthRouter bound to `127.0.0.1`).
+
+1. On your laptop:
+
+```bash
+ssh -L 8402:127.0.0.1:8402 <user>@<mac-mini-host>
+```
+
+2. In your laptop browser:
+
+```text
+http://127.0.0.1:8402/debug/dashboard?token=<OAUTHROUTER_LOCAL_TOKEN>
+```
+
+## Optional: bind to LAN (not recommended)
+
+If you want LAN access without SSH forwarding, bind the proxy to all interfaces:
+
+```js
+const proxy = await startProxy({
+  port: 8402,
+  listenHost: "0.0.0.0",
+  authToken: process.env.OAUTHROUTER_LOCAL_TOKEN,
+  // ...
+});
+```
+
+This exposes the port on your network. The proxy is token-gated, but SSH forwarding is recommended.
 
 ---
 
