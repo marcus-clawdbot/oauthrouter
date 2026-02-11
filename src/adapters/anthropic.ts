@@ -41,7 +41,11 @@ export type OpenAIChatCompletionsRequest = {
   [key: string]: unknown;
 };
 
-export type AnthropicTextBlock = { type: "text"; text: string };
+export type AnthropicTextBlock = { type: "text"; text: string; cache_control?: { type: string } };
+export type AnthropicImageBlock = {
+  type: "image";
+  source: { type: "base64"; media_type: string; data: string } | { type: "url"; url: string };
+};
 export type AnthropicToolUseBlock = { type: "tool_use"; id: string; name: string; input: unknown };
 export type AnthropicToolResultBlock = {
   type: "tool_result";
@@ -50,6 +54,7 @@ export type AnthropicToolResultBlock = {
 };
 export type AnthropicContentBlock =
   | AnthropicTextBlock
+  | AnthropicImageBlock
   | AnthropicToolUseBlock
   | AnthropicToolResultBlock;
 
@@ -64,10 +69,16 @@ export type AnthropicMessage = {
   content: AnthropicContentBlock[];
 };
 
+export type AnthropicSystemBlock = {
+  type: "text";
+  text: string;
+  cache_control?: { type: string };
+};
+
 export type AnthropicMessagesRequest = {
   model: string;
   max_tokens: number;
-  system?: string;
+  system?: string | AnthropicSystemBlock[];
   messages: AnthropicMessage[];
   temperature?: number;
   top_p?: number;
@@ -188,18 +199,48 @@ export function buildAnthropicMessagesRequestFromOpenAI(
     }
 
     if (role === "user") {
-      const content = text || "(empty message)";
-      messages.push({ role, content: [{ type: "text", text: content }] });
+      // FIX-5: Extract image content blocks alongside text
+      const contentBlocks: AnthropicContentBlock[] = [];
+      if (Array.isArray(m.content)) {
+        for (const part of m.content as any[]) {
+          if (!part || typeof part !== "object") continue;
+          if (part.type === "image_url" && part.image_url) {
+            // OpenAI image_url format → Anthropic image block
+            const url = typeof part.image_url === "string" ? part.image_url : part.image_url.url;
+            if (typeof url === "string") {
+              const dataMatch = url.match(/^data:(image\/[^;]+);base64,(.+)$/);
+              if (dataMatch) {
+                contentBlocks.push({
+                  type: "image",
+                  source: { type: "base64", media_type: dataMatch[1], data: dataMatch[2] },
+                });
+              } else {
+                contentBlocks.push({
+                  type: "image",
+                  source: { type: "url", url },
+                });
+              }
+            }
+          }
+        }
+      }
+      const textContent = text || (contentBlocks.length > 0 ? "" : "(empty message)");
+      if (textContent) {
+        contentBlocks.push({ type: "text", text: textContent });
+      }
+      messages.push({ role, content: contentBlocks });
       continue;
     }
 
     // Unknown roles ignored.
   }
 
+  // FIX-6: Default max_tokens raised from 4096 to 16384 to better match model
+  // capabilities (Opus 4.6 supports 32K, Sonnet/Haiku support 8K+).
   const maxTokens =
     typeof req.max_tokens === "number" && Number.isFinite(req.max_tokens)
       ? Math.max(1, Math.floor(req.max_tokens))
-      : 4096;
+      : 16384;
 
   const stopSequences: string[] | undefined =
     typeof req.stop === "string"
@@ -214,8 +255,13 @@ export function buildAnthropicMessagesRequestFromOpenAI(
     messages,
   };
 
+  // FIX-2: Use structured system blocks with cache_control for prompt caching.
+  // Anthropic's prompt caching can reduce input costs ~90% for repeated system prompts.
+  // Mark the last system block as ephemeral so the entire system prompt is cached.
   const system = systemParts.join("\n\n");
-  if (system) out.system = system;
+  if (system) {
+    out.system = [{ type: "text", text: system, cache_control: { type: "ephemeral" } }];
+  }
 
   if (typeof req.temperature === "number") out.temperature = req.temperature;
   if (typeof req.top_p === "number") out.top_p = req.top_p;

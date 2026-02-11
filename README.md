@@ -1,18 +1,27 @@
 # OAuthRouter
 
-A local proxy server that routes LLM requests across multiple providers using OAuth credentials. It translates OpenAI Chat Completions format to provider-native APIs (Anthropic Messages, OpenAI Codex Responses), with built-in smart routing, spend controls, and a real-time debug dashboard.
+**Sell-first summary:** OAuthRouter is a drop‑in **OpenAI‑compatible proxy** that lets you **route across Claude + Codex with OAuth**, **auto‑pick the cheapest capable model**, and **see every request live** — without changing your client code.
+
+**Why teams use it:**
+
+- _Cut costs fast_ with tiered auto‑routing (SIMPLE → REASONING)
+- _Stay reliable_ with multi‑provider fallbacks
+- _Keep OAuth clean_ (Anthropic OAuth, Codex OAuth, Claude Code compatibility)
+- _Debug in real time_ with a live dashboard + routing trace
+- _Ship safely_ with spend caps and request guards
 
 Built as an [OpenClaw](https://openclaw.ai) plugin but usable standalone.
 
-## Features
+## Features (At a Glance)
 
-- **Multi-provider routing** - Route requests to Anthropic (Claude), OpenAI Codex, or any OpenAI-compatible endpoint from a single `/v1/chat/completions` interface
-- **Smart auto-routing** - Classify prompts by complexity and route to the cheapest capable model (rules-based, <1ms, no external API calls)
-- **OAuth token support** - Works with Anthropic OAuth tokens (`sk-ant-oat-*`) and OpenAI Codex OAuth, including automatic Claude Code compatibility
-- **Full tool call support** - Translates OpenAI tool calls to/from Anthropic's native tool_use format, including streaming
-- **Spend controls** - Per-request and daily token/request budgets
-- **Debug dashboard** - Real-time web UI showing every routed request with tier, model, latency, and status
-- **Streaming** - Full SSE streaming support for both Anthropic and Codex upstreams
+- **Multi‑provider routing** — Anthropic (Claude), OpenAI Codex, and any OpenAI‑compatible endpoint via `/v1/chat/completions`
+- **Smart auto‑routing** — Rules‑based classifier (<1ms) chooses the cheapest capable tier
+- **OAuth‑native** — Anthropic OAuth tokens (`sk-ant-oat-*`) + OpenAI Codex OAuth with Claude Code compatibility
+- **Tool‑call translation** — OpenAI tool calls ↔ Anthropic `tool_use`, including streaming
+- **Spend controls** — Per‑request + daily budgets (tokens + requests)
+- **Debug dashboard** — Live request feed with tier, model, latency, status
+- **Routing trace API** — SSE stream + JSONL persistence for audits/analytics
+- **Streaming** — Full SSE support for both Anthropic and Codex upstreams
 
 ## Quick Start
 

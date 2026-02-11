@@ -729,7 +729,8 @@ const DEFAULT_UPSTREAM_RETRY: Partial<RetryConfig> = {
   maxRetries: 1,
   baseDelayMs: 250,
   // Prefer fast failover over waiting out rate limits.
-  retryableCodes: [502, 503, 504],
+  // 520/529 = Cloudflare upstream errors (common with Anthropic).
+  retryableCodes: [502, 503, 504, 520, 529],
 };
 
 /**
@@ -807,7 +808,8 @@ function shouldTriggerRateLimitFallback(
   status: number,
 ): boolean {
   if (!cfg || cfg.enabled === false) return false;
-  const codes = cfg.onStatusCodes && cfg.onStatusCodes.length > 0 ? cfg.onStatusCodes : [429];
+  // 429 = rate limit, 529 = Cloudflare overloaded (after retry exhaustion)
+  const codes = cfg.onStatusCodes && cfg.onStatusCodes.length > 0 ? cfg.onStatusCodes : [429, 529];
   if (!codes.includes(status)) return false;
 
   const from =
@@ -1500,7 +1502,13 @@ async function proxyRequest(
     const toolNameMap = new Map<string, string>(); // claudeCodeName → originalName
     if (providerAuthToken && providerAuthToken.startsWith("sk-ant-oat")) {
       const CLAUDE_CODE_PREAMBLE = "You are Claude Code, Anthropic's official CLI for Claude.";
-      const existingSystem = anthropicReq.system ?? "";
+      // Extract system text regardless of string or AnthropicSystemBlock[] format
+      const existingSystem =
+        typeof anthropicReq.system === "string"
+          ? anthropicReq.system
+          : Array.isArray(anthropicReq.system)
+            ? anthropicReq.system.map((b: any) => b.text ?? "").join("\n\n")
+            : "";
       // ROUTER-016: OAuth tokens validate the system prompt. Keep only the Claude Code
       // preamble in the system field; move the original prompt into the first user message.
       if (existingSystem && !existingSystem.startsWith(CLAUDE_CODE_PREAMBLE)) {
@@ -1566,7 +1574,13 @@ async function proxyRequest(
 
       // Debug: dump request details
       const toolNames = anthropicReq.tools?.map((t: any) => t.name) ?? [];
-      const sysPreamble = (anthropicReq.system ?? "").substring(0, 80);
+      const sysPreamble = (
+        typeof anthropicReq.system === "string"
+          ? anthropicReq.system
+          : Array.isArray(anthropicReq.system)
+            ? anthropicReq.system.map((b: any) => b.text ?? "").join(" ")
+            : ""
+      ).substring(0, 80);
       console.error(
         `[anthropic-req] model=${anthropicReq.model} tools=[${toolNames.join(",")}] system="${sysPreamble}..." msgs=${anthropicReq.messages?.length}`,
       );
@@ -1591,6 +1605,10 @@ async function proxyRequest(
           "cache-control": "no-cache, no-transform",
         });
 
+        // FIX-4: Send SSE heartbeat immediately to prevent OpenClaw 10-15s timeout
+        // while Anthropic is processing (especially for extended thinking).
+        nodeRes.write(": heartbeat\n\n");
+
         if (!upstream.body) {
           nodeRes.write("data: [DONE]\n\n");
           nodeRes.end();
@@ -1600,6 +1618,11 @@ async function proxyRequest(
         const created = Math.floor(Date.now() / 1000);
         const idFallback = `chatcmpl_${randomBytes(12).toString("hex")}`;
         let toolCallIndex = -1;
+        // FIX-3: Track usage from Anthropic SSE events
+        let usageInputTokens = 0;
+        let usageOutputTokens = 0;
+        // FIX-1: Track whether we're inside a thinking block
+        let insideThinkingBlock = false;
 
         for await (const frame of readSseDataFrames(upstream.body)) {
           if (frame.data === "[DONE]") break;
@@ -1607,6 +1630,29 @@ async function proxyRequest(
           if (!payload) continue;
 
           const type = typeof payload.type === "string" ? payload.type : "";
+
+          // FIX-3: Capture usage from message_start event
+          if (type === "message_start" && payload.message?.usage) {
+            usageInputTokens = payload.message.usage.input_tokens ?? 0;
+          }
+
+          // FIX-1: Track thinking block start/stop (don't forward thinking text as content)
+          if (type === "content_block_start" && payload.content_block?.type === "thinking") {
+            insideThinkingBlock = true;
+            continue;
+          }
+          if (type === "content_block_stop" && insideThinkingBlock) {
+            insideThinkingBlock = false;
+            continue;
+          }
+          // FIX-1: Skip thinking deltas — OpenClaw stores them from native API but
+          // they shouldn't be forwarded as content through the OpenAI compat layer.
+          if (
+            type === "content_block_delta" &&
+            (payload.delta?.type === "thinking_delta" || payload.delta?.type === "signature_delta")
+          ) {
+            continue;
+          }
 
           if (
             type === "content_block_delta" &&
@@ -1678,6 +1724,10 @@ async function proxyRequest(
             };
             nodeRes.write(`data: ${JSON.stringify(chunk)}\n\n`);
           } else if (type === "message_delta") {
+            // FIX-3: Capture output token usage from message_delta
+            if (payload.usage?.output_tokens) {
+              usageOutputTokens = payload.usage.output_tokens;
+            }
             // Final message delta with stop_reason
             const stopReason = payload.delta?.stop_reason;
             const finishReason =
@@ -1689,13 +1739,21 @@ async function proxyRequest(
                     ? "length"
                     : null;
             if (finishReason) {
-              const chunk = {
+              const chunk: Record<string, unknown> = {
                 id: idFallback,
                 object: "chat.completion.chunk",
                 created,
                 model: requestedModel,
                 choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
               };
+              // FIX-3: Attach usage to the final chunk
+              if (usageInputTokens > 0 || usageOutputTokens > 0) {
+                chunk.usage = {
+                  prompt_tokens: usageInputTokens,
+                  completion_tokens: usageOutputTokens,
+                  total_tokens: usageInputTokens + usageOutputTokens,
+                };
+              }
               nodeRes.write(`data: ${JSON.stringify(chunk)}\n\n`);
             }
           }
@@ -2501,7 +2559,7 @@ async function proxyRequest(
         };
 
         const codes =
-          fbCfg?.onStatusCodes && fbCfg.onStatusCodes.length > 0 ? fbCfg.onStatusCodes : [429];
+          fbCfg?.onStatusCodes && fbCfg.onStatusCodes.length > 0 ? fbCfg.onStatusCodes : [429, 529];
         if (!codes.includes(fbUpstream.status)) break;
       }
     }

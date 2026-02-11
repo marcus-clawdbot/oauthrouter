@@ -118,7 +118,7 @@ async function main() {
       enabled: true,
       // Keep this conservative; add providers as we gain confidence.
       fromProviders: ["anthropic", "openai-codex"],
-      onStatusCodes: [429],
+      onStatusCodes: [429, 529],
       chain,
     },
 
@@ -126,7 +126,7 @@ async function main() {
     retry: {
       maxRetries: 1,
       baseDelayMs: 250,
-      retryableCodes: [502, 503, 504],
+      retryableCodes: [502, 503, 504, 520, 529],
     },
   });
 
