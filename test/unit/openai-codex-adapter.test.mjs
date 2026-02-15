@@ -132,6 +132,78 @@ test("defaults instructions to helpful assistant when no system prompt", () => {
   assert.equal(req.instructions, "You are a helpful assistant.");
 });
 
+// ─── Image / Vision support ───
+
+test("passes image_url content blocks as input_image (URL string)", () => {
+  const req = buildCodexResponsesRequestFromOpenAIChatCompletions({
+    model: "openai-codex/gpt-5.2-codex",
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "What is in this image?" },
+          { type: "image_url", image_url: { url: "https://example.com/photo.jpg" } },
+        ],
+      },
+    ],
+  });
+  assert.equal(req.input.length, 1);
+  const blocks = req.input[0].content;
+  assert.equal(blocks.length, 2);
+  assert.deepEqual(blocks[0], { type: "input_text", text: "What is in this image?" });
+  assert.deepEqual(blocks[1], { type: "input_image", image_url: "https://example.com/photo.jpg" });
+});
+
+test("passes base64 data URI image_url as input_image", () => {
+  const dataUri = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==";
+  const req = buildCodexResponsesRequestFromOpenAIChatCompletions({
+    model: "openai-codex/gpt-5.2-codex",
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Describe" },
+          { type: "image_url", image_url: { url: dataUri } },
+        ],
+      },
+    ],
+  });
+  const blocks = req.input[0].content;
+  assert.equal(blocks.length, 2);
+  assert.deepEqual(blocks[1], { type: "input_image", image_url: dataUri });
+});
+
+test("handles image-only message (no text)", () => {
+  const req = buildCodexResponsesRequestFromOpenAIChatCompletions({
+    model: "openai-codex/gpt-5.2-codex",
+    messages: [
+      {
+        role: "user",
+        content: [{ type: "image_url", image_url: { url: "https://example.com/img.png" } }],
+      },
+    ],
+  });
+  assert.equal(req.input.length, 1);
+  const blocks = req.input[0].content;
+  assert.equal(blocks.length, 1);
+  assert.deepEqual(blocks[0], { type: "input_image", image_url: "https://example.com/img.png" });
+});
+
+test("handles image_url as plain string (not object)", () => {
+  const req = buildCodexResponsesRequestFromOpenAIChatCompletions({
+    model: "openai-codex/gpt-5.2-codex",
+    messages: [
+      {
+        role: "user",
+        content: [{ type: "image_url", image_url: "https://example.com/direct.jpg" }],
+      },
+    ],
+  });
+  const blocks = req.input[0].content;
+  assert.equal(blocks.length, 1);
+  assert.deepEqual(blocks[0], { type: "input_image", image_url: "https://example.com/direct.jpg" });
+});
+
 test("always sets stream=true", () => {
   const req = buildCodexResponsesRequestFromOpenAIChatCompletions({
     model: "openai-codex/gpt-5.2-codex",

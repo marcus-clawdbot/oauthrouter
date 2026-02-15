@@ -106,7 +106,37 @@ export function buildCodexResponsesRequestFromOpenAIChatCompletions(
           }
 
           if (role === "user") {
-            return [{ role, content: [{ type: "input_text" as const, text }] }];
+            const rawContent = (m as any).content;
+            const contentBlocks: any[] = [];
+
+            if (Array.isArray(rawContent)) {
+              for (const block of rawContent) {
+                if (!block || typeof block !== "object") continue;
+                const btype = (block as { type?: unknown }).type;
+                if (btype === "text" || btype === "input_text") {
+                  const t = (block as { text?: unknown }).text;
+                  if (typeof t === "string" && t) {
+                    contentBlocks.push({ type: "input_text" as const, text: t });
+                  }
+                } else if (btype === "image_url") {
+                  const imgField = (block as { image_url?: unknown }).image_url;
+                  const url =
+                    typeof imgField === "string"
+                      ? imgField
+                      : imgField && typeof (imgField as any).url === "string"
+                        ? (imgField as any).url
+                        : undefined;
+                  if (url) {
+                    contentBlocks.push({ type: "input_image" as const, image_url: url });
+                  }
+                }
+              }
+            } else if (typeof rawContent === "string" && rawContent) {
+              contentBlocks.push({ type: "input_text" as const, text: rawContent });
+            }
+
+            if (contentBlocks.length === 0) return [];
+            return [{ role, content: contentBlocks }];
           }
 
           if (role === "assistant") {
