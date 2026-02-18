@@ -1,29 +1,39 @@
 # OAuthRouter
 
-**Sell-first summary:** OAuthRouter is a drop‑in **OpenAI‑compatible proxy** that lets you **route across Claude + Codex with OAuth**, **auto‑pick the cheapest capable model**, and **see every request live** — without changing your client code.
+**One proxy. Every model. Cheapest path that works.**
 
-**New:** _Vision-aware auto-routing_ — requests that include **image content** are automatically upgraded to a safer minimum tier (defaults to **COMPLEX**) so you don’t accidentally route multimodal prompts to lightweight models.
+Drop-in OpenAI-compatible proxy that routes across Claude, Codex, and any `/v1/chat/completions` endpoint — with OAuth, automatic cost optimization, and vision-aware intelligence.
 
-**Why teams use it:**
+### Why OAuthRouter
 
-- _Cut costs fast_ with tiered auto‑routing (SIMPLE → REASONING)
-- _Stay reliable_ with multi‑provider fallbacks
-- _Keep OAuth clean_ (Anthropic OAuth, Codex OAuth, Claude Code compatibility)
-- _Debug in real time_ with a live dashboard + routing trace
-- _Ship safely_ with spend caps and request guards
+- **Auto-route to the cheapest capable model** — rules-based classifier scores 14 dimensions in <1ms, picks SIMPLE → REASONING
+- **Vision-aware routing** — image prompts auto-upgrade to a safe minimum tier (`imageMinTier: "COMPLEX"`) so multimodal requests never hit lightweight models
+- **Multi-provider failover** — Anthropic + OpenAI Codex with automatic fallbacks; add any OpenAI-compatible endpoint
+- **OAuth-native** — Anthropic OAuth (`sk-ant-oat-*`), Codex OAuth, Claude Code tool-name remapping — all transparent
+- **Spend controls** — per-request and daily budgets for tokens and requests
+- **Live debug dashboard** — real-time request feed with tier, model, latency, routing trace (SSE + JSONL)
+- **Full streaming** — SSE support for both Anthropic and Codex upstreams, including tool-call translation
 
-Built as an [OpenClaw](https://openclaw.ai) plugin but usable standalone.
+#### Vision-Aware Auto-Routing
 
-## Features (At a Glance)
+Requests containing `image_url` content blocks are detected automatically. The router upgrades the tier floor so images never land on a model that can't handle them:
 
-- **Multi‑provider routing** — Anthropic (Claude), OpenAI Codex, and any OpenAI‑compatible endpoint via `/v1/chat/completions`
-- **Smart auto‑routing** — Rules‑based classifier (<1ms) chooses the cheapest capable tier (now **vision-aware**: image prompts get a minimum tier)
-- **OAuth‑native** — Anthropic OAuth tokens (`sk-ant-oat-*`) + OpenAI Codex OAuth with Claude Code compatibility
-- **Tool‑call translation** — OpenAI tool calls ↔ Anthropic `tool_use`, including streaming
-- **Spend controls** — Per‑request + daily budgets (tokens + requests)
-- **Debug dashboard** — Live request feed with tier, model, latency, status
-- **Routing trace API** — SSE stream + JSONL persistence for audits/analytics
-- **Streaming** — Full SSE support for both Anthropic and Codex upstreams
+```ts
+const handle = await startProxy({
+  // ...providers
+  routingConfig: {
+    ...DEFAULT_ROUTING_CONFIG,
+    overrides: {
+      ...DEFAULT_ROUTING_CONFIG.overrides,
+      imageMinTier: "COMPLEX", // default — image prompts skip SIMPLE/MEDIUM
+    },
+  },
+});
+```
+
+No client changes needed — send `model: "auto"` with an image and the router does the right thing.
+
+Built as an [OpenClaw](https://openclaw.ai) plugin, but fully usable standalone.
 
 ## Quick Start
 
