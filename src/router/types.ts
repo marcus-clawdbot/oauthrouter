@@ -69,6 +69,7 @@ export type ClassifierConfig = {
 export type OverridesConfig = {
   maxTokensForceComplex: number;
   structuredOutputMinTier: Tier;
+  imageMinTier: Tier;
   ambiguousDefaultTier: Tier;
 };
 

@@ -1339,11 +1339,20 @@ async function proxyRequest(
     const lastUserMsg = userMessages.length > 0 ? userMessages[userMessages.length - 1] : undefined;
     const prompt = lastUserMsg ? _coerce(lastUserMsg.content) : "";
 
+    // Detect image content in the last user message
+    const hasImageContent = (() => {
+      if (!lastUserMsg || !Array.isArray(lastUserMsg.content)) return false;
+      return lastUserMsg.content.some(
+        (block: any) => block && typeof block === "object" && block.type === "image_url",
+      );
+    })();
+
     const modelPricing = buildModelPricingForAuto();
     // Don't pass system prompt to router - it's the agent identity, not the user's request
     const decision = route(prompt, undefined, maxTokens, {
       config: options.routingConfig ?? DEFAULT_AUTO_ROUTING_CONFIG,
       modelPricing,
+      hasImageContent,
     });
 
     modelId = decision.model;

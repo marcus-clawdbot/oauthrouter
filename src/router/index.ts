@@ -13,6 +13,7 @@ import { selectModel, type ModelPricing } from "./selector.js";
 export type RouterOptions = {
   config: RoutingConfig;
   modelPricing: Map<string, ModelPricing>;
+  hasImageContent?: boolean;
 };
 
 /**
@@ -77,6 +78,16 @@ export function route(
     const minTier = config.overrides.structuredOutputMinTier;
     if (tierRank[tier] < tierRank[minTier]) {
       reasoning += ` | upgraded to ${minTier} (structured output)`;
+      tier = minTier;
+    }
+  }
+
+  // Apply image content minimum tier
+  if (options.hasImageContent) {
+    const tierRank: Record<Tier, number> = { SIMPLE: 0, MEDIUM: 1, COMPLEX: 2, REASONING: 3 };
+    const minTier = config.overrides.imageMinTier;
+    if (tierRank[tier] < tierRank[minTier]) {
+      reasoning += ` | upgraded to ${minTier} (image content)`;
       tier = minTier;
     }
   }

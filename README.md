@@ -2,6 +2,8 @@
 
 **Sell-first summary:** OAuthRouter is a drop‑in **OpenAI‑compatible proxy** that lets you **route across Claude + Codex with OAuth**, **auto‑pick the cheapest capable model**, and **see every request live** — without changing your client code.
 
+**New:** _Vision-aware auto-routing_ — requests that include **image content** are automatically upgraded to a safer minimum tier (defaults to **COMPLEX**) so you don’t accidentally route multimodal prompts to lightweight models.
+
 **Why teams use it:**
 
 - _Cut costs fast_ with tiered auto‑routing (SIMPLE → REASONING)
@@ -15,7 +17,7 @@ Built as an [OpenClaw](https://openclaw.ai) plugin but usable standalone.
 ## Features (At a Glance)
 
 - **Multi‑provider routing** — Anthropic (Claude), OpenAI Codex, and any OpenAI‑compatible endpoint via `/v1/chat/completions`
-- **Smart auto‑routing** — Rules‑based classifier (<1ms) chooses the cheapest capable tier
+- **Smart auto‑routing** — Rules‑based classifier (<1ms) chooses the cheapest capable tier (now **vision-aware**: image prompts get a minimum tier)
 - **OAuth‑native** — Anthropic OAuth tokens (`sk-ant-oat-*`) + OpenAI Codex OAuth with Claude Code compatibility
 - **Tool‑call translation** — OpenAI tool calls ↔ Anthropic `tool_use`, including streaming
 - **Spend controls** — Per‑request + daily budgets (tokens + requests)
