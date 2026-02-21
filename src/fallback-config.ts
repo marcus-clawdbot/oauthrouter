@@ -14,7 +14,7 @@ import type { ProviderId } from "./model-registry.js";
 export const FALLBACK_MODELS = {
   anthropic: {
     SIMPLE: "anthropic/claude-haiku-4-5",
-    MEDIUM: "anthropic/claude-sonnet-4-5",
+    MEDIUM: "anthropic/claude-sonnet-4-6",
     COMPLEX: "anthropic/claude-opus-4-6",
     REASONING: "anthropic/claude-opus-4-6",
   },
@@ -51,6 +51,7 @@ export function canonicalModelForProviderTier(
 export const ANTHROPIC_TO_CODEX_FALLBACK_MODEL_MAP: Record<string, string> = {
   "anthropic/claude-haiku-4-5": FALLBACK_MODELS["openai-codex"].SIMPLE,
   "anthropic/claude-sonnet-4-5": FALLBACK_MODELS["openai-codex"].SIMPLE,
+  "anthropic/claude-sonnet-4-6": FALLBACK_MODELS["openai-codex"].SIMPLE,
   "anthropic/claude-opus-4-6": FALLBACK_MODELS["openai-codex"].COMPLEX,
   "anthropic/claude-opus-4-5": FALLBACK_MODELS["openai-codex"].COMPLEX,
 };
@@ -58,6 +59,7 @@ export const ANTHROPIC_TO_CODEX_FALLBACK_MODEL_MAP: Record<string, string> = {
 export const ANTHROPIC_TO_DEEPSEEK_FALLBACK_MODEL_MAP: Record<string, string> = {
   "anthropic/claude-haiku-4-5": FALLBACK_MODELS.deepseek.MEDIUM,
   "anthropic/claude-sonnet-4-5": FALLBACK_MODELS.deepseek.MEDIUM,
+  "anthropic/claude-sonnet-4-6": FALLBACK_MODELS.deepseek.MEDIUM,
   "anthropic/claude-opus-4-6": FALLBACK_MODELS.deepseek.REASONING,
   "anthropic/claude-opus-4-5": FALLBACK_MODELS.deepseek.REASONING,
 };

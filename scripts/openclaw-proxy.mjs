@@ -80,7 +80,7 @@ async function main() {
 
   const proxy = await startProxy({
     port: Number(process.env.OAUTHROUTER_PORT || "8402"),
-    listenHost: process.env.OAUTHROUTER_LISTEN_HOST || "127.0.0.1",
+    listenHost: process.env.OAUTHROUTER_LISTEN_HOST || "0.0.0.0",
     authToken,
 
     // Persist provider cooldowns across restarts so we can pre-route away from providers

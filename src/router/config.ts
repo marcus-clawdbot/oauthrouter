@@ -453,10 +453,10 @@ export const DEFAULT_ROUTING_CONFIG: RoutingConfig = {
     },
     MEDIUM: {
       primary: "openai-codex/gpt-5.2-codex",
-      fallback: ["anthropic/claude-sonnet-4-5", FALLBACK_MODELS["openai-codex"].MEDIUM],
+      fallback: ["anthropic/claude-sonnet-4-6", FALLBACK_MODELS["openai-codex"].MEDIUM],
     },
     COMPLEX: {
-      primary: "anthropic/claude-sonnet-4-5",
+      primary: "anthropic/claude-sonnet-4-6",
       fallback: ["anthropic/claude-opus-4-5", FALLBACK_MODELS["openai-codex"].COMPLEX],
     },
     REASONING: {

@@ -189,6 +189,31 @@ export const BLOCKRUN_MODELS: BlockRunModel[] = [
     maxOutput: 32000,
     reasoning: true,
   },
+  {
+    id: "anthropic/claude-sonnet-4-5",
+    name: "Claude Sonnet 4.5",
+    inputPrice: 3.0,
+    outputPrice: 15.0,
+    contextWindow: 200000,
+    maxOutput: 64000,
+  },
+  {
+    id: "anthropic/claude-sonnet-4-6",
+    name: "Claude Sonnet 4.6",
+    inputPrice: 3.0,
+    outputPrice: 15.0,
+    contextWindow: 200000,
+    maxOutput: 64000,
+  },
+  {
+    id: "anthropic/claude-opus-4-6",
+    name: "Claude Opus 4.6",
+    inputPrice: 15.0,
+    outputPrice: 75.0,
+    contextWindow: 200000,
+    maxOutput: 128000,
+    reasoning: true,
+  },
 
   // Google
   {

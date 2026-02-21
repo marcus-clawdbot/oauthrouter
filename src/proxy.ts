@@ -272,10 +272,10 @@ const DEFAULT_AUTO_ROUTING_CONFIG: RoutingConfig = {
     },
     MEDIUM: {
       primary: "openai-codex/gpt-5.2-codex",
-      fallback: ["anthropic/claude-sonnet-4-5", FALLBACK_MODELS["openai-codex"].MEDIUM],
+      fallback: ["anthropic/claude-sonnet-4-6", FALLBACK_MODELS["openai-codex"].MEDIUM],
     },
     COMPLEX: {
-      primary: "anthropic/claude-sonnet-4-5",
+      primary: "anthropic/claude-sonnet-4-6",
       fallback: ["anthropic/claude-opus-4-5", FALLBACK_MODELS["openai-codex"].COMPLEX],
     },
     REASONING: {
@@ -1085,8 +1085,11 @@ export async function startProxy(options: ProxyOptions): Promise<ProxyHandle> {
     }
 
     if (!token || !constantTimeTokenEquals(token, authToken)) {
-      sendJson(res, 401, { error: { message: "Unauthorized", type: "proxy_auth_error" } });
-      return;
+      // Allow unauthenticated access to debug dashboard and health
+      if (!isDebug && req.url !== "/health" && !req.url?.startsWith("/health?")) {
+        sendJson(res, 401, { error: { message: "Unauthorized", type: "proxy_auth_error" } });
+        return;
+      }
     }
 
     if (req.url === "/health" || req.url?.startsWith("/health?")) {
@@ -1098,7 +1101,11 @@ export async function startProxy(options: ProxyOptions): Promise<ProxyHandle> {
       res.writeHead(200, {
         "content-type": "text/html; charset=utf-8",
         "cache-control": "no-store",
-        "set-cookie": `oauthrouter_token=${encodeURIComponent(token)}; Path=/; SameSite=Strict`,
+        ...(token
+          ? {
+              "set-cookie": `oauthrouter_token=${encodeURIComponent(token)}; Path=/; SameSite=Strict`,
+            }
+          : {}),
       });
       res.end(ROUTING_TRACE_DASHBOARD_HTML);
       return;

@@ -56,8 +56,9 @@ function coerceCredential(value: unknown): OpenClawAuthProfileCredential | null 
     const access = isNonEmptyString(v.access) ? String(v.access) : undefined;
     const refresh = isNonEmptyString(v.refresh) ? String(v.refresh) : undefined;
 
+    const rawExpires = v.expiresAt ?? v.expires;
     const expiresAt =
-      typeof v.expiresAt === "number" && Number.isFinite(v.expiresAt) ? v.expiresAt : undefined;
+      typeof rawExpires === "number" && Number.isFinite(rawExpires) ? rawExpires : undefined;
 
     return { type: "oauth", provider: String(v.provider), access, refresh, expiresAt };
   }
